@@ -1,0 +1,18 @@
+[Unit]
+Description=terminal-mode-console
+Documentation=https://github.com/sunasaji/terminal-mode-console
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# The instance name is the systemd-escaped absolute path to the checkout.
+# %f turns it back into an absolute filesystem path.
+WorkingDirectory=%f
+EnvironmentFile=%h/.config/terminal-mode-console/env
+ExecStart=/usr/bin/env node %f/server.mjs
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

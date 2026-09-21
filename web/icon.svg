@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- The background is full-bleed (no rounded corners). The OS applies its own rounding
+       or mask on the home screen, so this doubles as the maskable icon. The colour matches
+       the UI's theme-color. -->
+  <rect width="512" height="512" fill="#12151a"/>
+  <!-- A terminal prompt, "> _". The glyphs stay inside the maskable safe zone (radius ~205
+       from the centre). Drawn as stroked paths rather than text to avoid font dependence. -->
+  <g fill="none" stroke="#4a90d9" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="184,176 300,256 184,336"/>
+    <line x1="316" y1="336" x2="372" y2="336"/>
+  </g>
+</svg>

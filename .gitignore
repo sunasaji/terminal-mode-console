@@ -1,0 +1,5 @@
+node_modules/
+*.log
+*.token
+.env
+.DS_Store

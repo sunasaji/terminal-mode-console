@@ -1,0 +1,2653 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <!-- The static title / theme-color / favicon values are fallbacks used before JS loads.
+     After loading, applyProviderChrome overrides them per provider (claude/codex/local). -->
+    <title>terminal-mode-console</title>
+    <!-- PWA (minimal setup with no Service Worker). Adding it to the home screen launches it standalone.
+     The manifest and icons are fetched without an auth token, so server.mjs serves them ahead of authentication. -->
+    <meta name="theme-color" content="#12151a" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <!-- For iOS "Add to Home Screen". Launches standalone without needing a Service Worker or HTTPS. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="tmcon" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --accent: #6b7481;
+      }
+      /* Per-provider accent color. The single source of color truth for telling windows/tabs apart at a glance.
+     JS (applyProviderChrome) reads this --accent and applies it to the tab name/favicon/theme-color. */
+      [data-provider="claude"] {
+        --accent: #d97757;
+      } /* terracotta */
+      [data-provider="codex"] {
+        --accent: #10a37f;
+      } /* green */
+      [data-provider="local"] {
+        --accent: #a78bfa;
+      } /* purple */
+      * {
+        box-sizing: border-box;
+      }
+      /* A restored mobile tab may retain its previous horizontal scroll position.
+     Set width explicitly too so the horizontal axis is not a scrollable area in the first place. */
+      html,
+      body {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden;
+      }
+      @supports (overflow: clip) {
+        html,
+        body {
+          overflow-x: clip;
+        }
+      }
+      body {
+        margin: 0;
+        height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        background: #0b0d10;
+        color: #d8dee6;
+        font:
+          15px/1.6 ui-monospace,
+          "SF Mono",
+          Menlo,
+          Consolas,
+          monospace;
+      }
+      /* Without min-width:0, the content's minimum width pushes body (a vertical flex) wider, and stretch
+     expands header/footer to that same width too, overflowing the screen. Set it to 0 and let the content wrap. */
+      header,
+      main,
+      footer {
+        min-width: 0;
+      }
+      header,
+      footer {
+        flex: none;
+        padding: 8px 10px;
+        background: #12151a;
+        border-color: #232830;
+      }
+      header {
+        border-bottom: 1px solid #232830;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      /* Show the provider accent color as a band at the very top of the header. The primary identifier when windows are lined up. */
+      header {
+        border-top: 3px solid var(--accent);
+      }
+      footer {
+        border-top: 1px solid #232830;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      /* The footer has two columns. Left = status + attachments + textarea; right = interrupt/attach/send stacked vertically.
+     Both columns are made the same height with stretch. The left is top-aligned (status -> textarea) with the textarea
+     stretched to the bottom edge via flex:1. The right is bottom-aligned so send sits at the very bottom. => Tops align at the top, bottoms line up. */
+      footer .footcols {
+        display: flex;
+        gap: 8px;
+        align-items: stretch;
+        min-width: 0;
+      }
+      footer .colmain {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      footer .colbtns {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: stretch;
+        justify-content: flex-end;
+      }
+      footer .colbtns button {
+        flex: none;
+        padding: 6px 12px;
+      }
+      #toggleInfo {
+        margin-left: auto;
+        flex: none;
+        padding: 4px 9px;
+      }
+      select,
+      button,
+      textarea,
+      input {
+        font: inherit;
+        background: #1a1f26;
+        color: #d8dee6;
+        border: 1px solid #2c333d;
+        border-radius: 6px;
+        padding: 6px 9px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        background: #232a33;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      button.primary {
+        background: #2f6fb5;
+        border-color: #2f6fb5;
+        color: #fff;
+      }
+      #toggleArchived[aria-pressed="true"] {
+        background: #263648;
+        border-color: #52779d;
+      }
+      #sessions {
+        max-width: 42vw;
+        min-width: 0;
+      }
+      #cwdBox {
+        flex: 1;
+        min-width: 0;
+        font-size: 16px;
+      } /* Fill the remaining space and push to the right. 16px avoids iOS auto-zoom */
+      label.sw {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 13px;
+        color: #9aa5b1;
+        cursor: pointer;
+      }
+      /* The status row sits directly above the input field. Same role as the "Waiting input" line at the bottom of the glasses. */
+      #stateRow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        min-height: 1.4em;
+      }
+      #state {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        color: #7fb2f0;
+      }
+      #usage {
+        margin-left: auto;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex: none;
+        color: #8b94a0;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      #usage[hidden] {
+        display: none;
+      }
+      #usage button {
+        border: 0;
+        border-radius: 3px;
+        padding: 0;
+        background: none;
+        color: inherit;
+        font-size: inherit;
+        text-decoration: underline dotted;
+        text-underline-offset: 3px;
+      }
+      #usage button:hover {
+        background: none;
+        color: #d8dee6;
+      }
+      /* Token-count slots (local mode) aren't clickable popups — drop the dotted underline. */
+      #usage button.tokval {
+        text-decoration: none;
+        cursor: default;
+      }
+      /* Traffic-light colors for the usage markers. Thresholds are at 50% / 80%. */
+      #usage .u-ok {
+        color: #8fd18f;
+      } /* up to 50%  comfortable */
+      #usage .u-warn {
+        color: #f0c987;
+      } /* 50-80% warning */
+      #usage .u-crit {
+        color: #ef8f8f;
+      } /* 80%+  danger */
+      #usagePopup {
+        position: fixed;
+        z-index: 20;
+        max-width: calc(100vw - 20px);
+        padding: 7px 10px;
+        border: 1px solid #39424e;
+        border-radius: 7px;
+        background: #1a1f26;
+        color: #d8dee6;
+        font-size: 12px;
+        box-shadow: 0 4px 18px #0008;
+        white-space: nowrap;
+      }
+      #usagePopup[hidden] {
+        display: none;
+      }
+      /* The i button stays in the top row while the expanded info panel occupies the next line of the header. */
+      #topInfo {
+        display: flex;
+        flex: 1 0 100%;
+        gap: 8px;
+        align-items: center;
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+      #topInfo[hidden] {
+        display: none;
+      }
+      #state.wait {
+        color: #f0c987;
+      } /* Make "waiting for input" stand out */
+      .be {
+        font-size: 12px;
+        color: #8b94a0;
+        border: 1px solid #2c333d;
+        border-radius: 999px;
+        padding: 2px 9px;
+      }
+      select.be {
+        background: #161a20;
+        cursor: pointer;
+      }
+      /* Backend unreachable. Overrides the provider accent below, since in this state
+         the pill is reporting a failure rather than which provider is connected. */
+      #backend.err {
+        color: #ff8a80 !important;
+        border-color: #7f3b36 !important;
+        background: #2a1a19 !important;
+      }
+      /* The backend pill is emphasized with the accent color, indicating the provider by both text and color. */
+      #backend {
+        color: var(--accent);
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+      main {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px 14px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      main[hidden] {
+        display: none;
+      }
+      .user {
+        color: #8fd18f;
+        margin-top: 14px;
+      }
+      .user::before {
+        content: "› ";
+        opacity: 0.6;
+      }
+      .assistant {
+        margin-top: 6px;
+      }
+      .dim {
+        color: #6b7481;
+        font-size: 13px;
+      } /* tool_end / notification = dim text */
+      .err {
+        color: #e8a0a0;
+      } /* error = normal brightness */
+      /* Height grows automatically with the content (autoGrow). Manual resize is disabled to keep it under JS control. */
+      /* Keep font-size at 16px or more. Below 16px, iOS auto-zooms in on focus. */
+      #input {
+        flex: 1;
+        min-width: 0;
+        font-size: 16px;
+        resize: none;
+        min-height: 2.6em;
+        max-height: 40vh;
+        overflow-y: auto;
+      }
+      #input.drop {
+        border-color: #2f6fb5;
+        background: #12202f;
+      } /* Input field while a file is being dragged over */
+      /* Thumbnail row of attached images (pre-send preview). Each can be removed individually with the ×. */
+      .attach {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .attach[hidden] {
+        display: none;
+      }
+      .attach .thumb {
+        position: relative;
+        width: 48px;
+        height: 48px;
+      }
+      .attach .thumb img {
+        width: 48px;
+        height: 48px;
+        object-fit: cover;
+        border-radius: 6px;
+        border: 1px solid #2c333d;
+      }
+      .attach .thumb button {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        padding: 0;
+        width: 18px;
+        height: 18px;
+        line-height: 1;
+        border-radius: 999px;
+        background: #3a2a12;
+        border-color: #5a4520;
+        font-size: 12px;
+      }
+      /* Text file attachments are shown as a 📄 chip + filename (the content is inlined into the body at send time) */
+      .attach .file {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        max-width: 220px;
+        height: 48px;
+        padding: 0 10px;
+        border: 1px solid #2c333d;
+        border-radius: 6px;
+        background: #1a1f26;
+        font-size: 12px;
+      }
+      .attach .file .nm {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .attach .file button {
+        padding: 0;
+        width: 18px;
+        height: 18px;
+        line-height: 1;
+        border-radius: 999px;
+        background: #3a2a12;
+        border-color: #5a4520;
+        font-size: 12px;
+      }
+      #banner {
+        padding: 10px 14px;
+        background: #3a2a12;
+        color: #f0c987;
+        font-size: 13px;
+      }
+      /* ── Questions from the agent / permission requests (inline answers) ─────────
+     Cards are placed inside the log (the scroll area) rather than in a modal. Questions
+     put option buttons, a free-text field, and a submit button at the end; permission
+     requests put buttons like Yes/No at the end. Even after answering, both "what was asked"
+     and "what was answered" remain. The look is the same when restored from history (readonly).
+     Permission cards only change color via .qcard.perm. */
+      .qcard {
+        margin: 14px 0 6px;
+        padding: 10px 12px;
+        border: 1px solid #2c333d;
+        border-radius: 10px;
+        background: #12161c;
+        white-space: normal;
+      }
+      .qcard-head {
+        font-size: 12px;
+        color: #f0c987;
+        margin-bottom: 8px;
+      }
+      .qcard.done .qcard-head {
+        color: #8b94a0;
+      }
+      .qblock {
+        margin-bottom: 10px;
+      }
+      .qblock:last-of-type {
+        margin-bottom: 0;
+      }
+      .qhdr {
+        font-size: 13px;
+        color: #9aa5b1;
+      }
+      .qtext {
+        margin: 2px 0 8px;
+        white-space: pre-wrap;
+      }
+      .qopts {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .qopt {
+        text-align: left;
+        white-space: normal;
+      }
+      .qopt small {
+        display: block;
+        color: #8b94a0;
+        margin-top: 2px;
+      }
+      .qopt.chosen {
+        border-color: #2f6fb5;
+        background: #17324c;
+        color: #fff;
+      }
+      .qopt.chosen small {
+        color: #cfe0f2;
+      }
+      .qfree {
+        display: block;
+        width: 100%;
+        margin-top: 8px;
+        resize: none;
+        min-height: 2.4em;
+        max-height: 30vh;
+        overflow-y: auto;
+        font-size: 16px;
+      }
+      .qsubmit {
+        margin-top: 8px;
+      }
+      .qcard-foot {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #8fd18f;
+      }
+      .qcard-foot.cancel {
+        color: #e8a0a0;
+      }
+      .qcard-foot.deny {
+        color: #e8a0a0;
+      }
+      /* Permission request card. Same skeleton as the question card, distinguished only by the heading color. */
+      .qcard.perm .qcard-head {
+        color: #7fb2f0;
+      }
+      .qcard.perm.done .qcard-head {
+        color: #8b94a0;
+      }
+
+      /* ── Collapsing of tool execution logs ─────────────────────────────
+     tool_end entries are placed inline in chronological order. Consecutive ones are grouped
+     into a single <details>, collapsed by default to show just a one-line summary (so many executions don't fill the screen). */
+      details.tools {
+        margin: 2px 0;
+      }
+      details.tools > summary {
+        color: #6b7481;
+        font-size: 13px;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      details.tools[open] > summary {
+        color: #8b94a0;
+      }
+      .tools-body {
+        color: #6b7481;
+        font-size: 13px;
+        padding-left: 1.3em;
+        margin-top: 2px;
+      }
+      .tools-body .tool-row {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      /* ── Markdown rendering of LLM replies ──────────────────────────────
+     During streaming it is plain text (.assistant, inheriting main's pre-wrap).
+     On completion, .md is added and it is turned into HTML. .md returns to normal flow. */
+      .assistant.md {
+        white-space: normal;
+      }
+      .md > :first-child {
+        margin-top: 0;
+      }
+      .md > :last-child {
+        margin-bottom: 0;
+      }
+      .md p {
+        margin: 0 0 0.6em;
+      }
+      .md h1,
+      .md h2,
+      .md h3,
+      .md h4 {
+        margin: 0.8em 0 0.4em;
+        line-height: 1.3;
+        color: #e6ebf2;
+      }
+      .md h1 {
+        font-size: 1.4em;
+      }
+      .md h2 {
+        font-size: 1.25em;
+      }
+      .md h3 {
+        font-size: 1.1em;
+      }
+      .md ul,
+      .md ol {
+        margin: 0.2em 0 0.6em;
+        padding-left: 1.4em;
+      }
+      .md li {
+        margin: 0.15em 0;
+      }
+      .md blockquote {
+        margin: 0.4em 0;
+        padding: 0.1em 0.8em;
+        border-left: 3px solid #2c333d;
+        color: #9aa5b1;
+      }
+      .md a {
+        color: #7fb2f0;
+      }
+      .md code {
+        background: #161b22;
+        padding: 0.1em 0.35em;
+        border-radius: 4px;
+        font-size: 0.92em;
+      }
+      .md pre {
+        background: #161b22;
+        padding: 10px 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+        margin: 0.4em 0;
+        white-space: pre;
+      }
+      .md pre code {
+        background: none;
+        padding: 0;
+        font-size: 0.9em;
+      }
+      .md table {
+        border-collapse: collapse;
+        margin: 0.5em 0;
+        font-size: 0.92em;
+        display: block;
+        max-width: 100%;
+        overflow-x: auto;
+      }
+      .md th,
+      .md td {
+        border: 1px solid #2c333d;
+        padding: 4px 8px;
+      }
+      .md hr {
+        border: none;
+        border-top: 1px solid #2c333d;
+        margin: 0.8em 0;
+      }
+      .md img {
+        max-width: 100%;
+      }
+      /* Markdown / XML metadata inside the custom tags appended to user input. */
+      .user.tagged {
+        white-space: normal;
+      }
+      .user.metadata-only {
+        color: #d8dee6;
+      }
+      .user.metadata-only::before {
+        content: none;
+      }
+      .tagged-plain {
+        white-space: pre-wrap;
+      }
+      .tagged-block {
+        margin: 0.45em 0;
+        padding: 0.5em 0.75em;
+        border-left: 2px solid #355943;
+        background: #101713;
+        color: #d8dee6;
+      }
+      .tagged-title {
+        margin-bottom: 0.35em;
+        color: #9aa5b1;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .xml-tree {
+        font-size: 0.92em;
+      }
+      .xml-node {
+        margin-left: 1em;
+      }
+      .xml-tree > .xml-node {
+        margin-left: 0;
+      }
+      .xml-row {
+        display: grid;
+        grid-template-columns: minmax(8em, max-content) minmax(0, 1fr);
+        column-gap: 0.8em;
+        padding: 0.08em 0;
+      }
+      .xml-key {
+        color: #8fb4da;
+      }
+      .xml-value {
+        min-width: 0;
+        color: #d8dee6;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .xml-attrs {
+        color: #8b94a0;
+        font-size: 0.9em;
+      }
+      /* Make diff2html blend into the dark background (monospace, slightly smaller) */
+      .d2h-wrap {
+        margin: 0.5em 0;
+        font-size: 0.86em;
+      }
+      .d2h-wrap .d2h-file-wrapper {
+        border-color: #2c333d;
+      }
+    </style>
+    <link rel="stylesheet" href="vendor/hljs-github-dark.min.css" />
+    <link rel="stylesheet" href="vendor/diff2html.min.css" />
+  </head>
+  <body>
+    <header>
+      <select id="sessions"></select>
+      <input
+        id="cwdBox"
+        list="cwdList"
+        autocomplete="off"
+        placeholder="Filter by cwd / cwd for new session"
+        data-i18n-placeholder="cwd.placeholder"
+        data-i18n-title="cwd.title"
+        title="Shows only sessions whose working directory contains this text. This path is also used as the working directory for a new session (the server default is used when empty)."
+      />
+      <datalist id="cwdList"></datalist>
+      <button id="newSession" data-i18n="action.new">New</button>
+      <button id="toggleArchived" aria-pressed="false" hidden></button>
+      <button
+        id="toggleInfo"
+        title="Show connection information / session actions"
+        data-i18n-title="info.show"
+        hidden
+      >
+        ⓘ
+      </button>
+      <span id="topInfo">
+        <span id="backend" class="be"></span>
+        <select
+          id="modelSelect"
+          class="be"
+          data-i18n-title="model.title"
+          title="Model. Your choice applies from the next turn and carries over to other clients (glasses, etc.). While nothing is picked, no model is sent and the current setting is inherited. “Auto” clears the remembered model."
+          hidden
+        ></select>
+        <label class="sw"
+          ><input type="checkbox" id="inputOnly" />
+          <span data-i18n="input.only"
+            >Input only (output on glasses)</span
+          ></label
+        >
+        <button id="archiveSession" data-i18n="archive.action" disabled hidden>
+          Archive
+        </button>
+      </span>
+    </header>
+
+    <div id="banner" hidden></div>
+    <main id="log"></main>
+
+    <footer>
+      <div class="footcols">
+        <!-- Left column: status row + attachment preview + textarea -->
+        <div class="colmain">
+          <div id="stateRow">
+            <div id="state">Waiting input</div>
+            <div id="usage" hidden>
+              <span id="contextUsage">Ctx:—</span>
+              <button id="fiveHourUsage" type="button">5h:—</button>
+              <button id="sevenDayUsage" type="button">1w:—</button>
+            </div>
+          </div>
+          <div id="attach" class="attach" hidden></div>
+          <textarea
+            id="input"
+            rows="2"
+            placeholder="Message (Ctrl+Enter to send)"
+            data-i18n-placeholder="input.placeholder"
+          ></textarea>
+        </div>
+        <!-- Right column: interrupt / attach / send -->
+        <div class="colbtns">
+          <button id="stop" data-i18n="action.stop" disabled>Stop</button>
+          <button
+            id="attachBtn"
+            title="Attach images"
+            data-i18n-title="attachment.add"
+          >
+            📎
+          </button>
+          <button id="send" class="primary" data-i18n="action.send">
+            Send
+          </button>
+        </div>
+      </div>
+      <input type="file" id="file" multiple hidden />
+    </footer>
+    <div id="usagePopup" role="status" hidden></div>
+
+    <!-- Markdown / sanitization / code highlighting / diff. Vendored under web/vendor/.
+     Each exposes a UMD global (marked, DOMPurify, hljs, Diff2Html). -->
+    <script src="vendor/marked.min.js"></script>
+    <script src="vendor/purify.min.js"></script>
+    <script src="vendor/highlight.min.js"></script>
+    <script src="vendor/diff2html.min.js"></script>
+    <script src="tagged-markdown.js"></script>
+    <script>
+      "use strict";
+      const qs = new URLSearchParams(location.search);
+      // The token is normally passed via a URL query (the pairing URL). However, when launched
+      // standalone from the home screen as a PWA, the token is not carried in start_url, so a token
+      // once received is stashed in localStorage and restored from there when absent from the URL.
+      // Since the token is normally carried in plaintext in the URL (which remains in history and
+      // server logs), storing it in same-origin localStorage does not change the exposure level.
+      const LS_TOKEN_KEY = "tmcon.token";
+      const LS_SHOW_ARCHIVED_KEY = "tmcon.showArchived";
+      let token = qs.get("token") || "";
+      try {
+        if (token) localStorage.setItem(LS_TOKEN_KEY, token);
+        else token = localStorage.getItem(LS_TOKEN_KEY) || "";
+      } catch {
+        /* If localStorage is unavailable (e.g. private mode), operate with only the URL token */
+      }
+      const TOKEN = token;
+      const PROVIDER = qs.get("defaultProvider") || "claude";
+
+      // Switch the appearance per provider (accent color/tab name/favicon/theme-color) so that
+      // claude / codex / local windows and tabs can be told apart at a glance when lined up.
+      // The single source of color truth is CSS's [data-provider] { --accent }. Here we read that and
+      // apply it to the tab name, favicon, and mobile theme-color, which CSS cannot change.
+      document.documentElement.dataset.provider = PROVIDER;
+      (function applyProviderChrome() {
+        const accent =
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--accent")
+            .trim() || "#6b7481";
+        const name = PROVIDER.charAt(0).toUpperCase() + PROVIDER.slice(1);
+        document.title = `${name} · tmcon`;
+        const themeMeta = document.querySelector('meta[name="theme-color"]');
+        if (themeMeta) themeMeta.setAttribute("content", accent);
+        // The favicon uses the same terminal prompt ">_" as icon.svg, with only the stroke set to the accent color.
+        // This way the provider can be told apart by color in the tab/taskbar/Alt-Tab while keeping the icon's design.
+        const svg =
+          `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">` +
+          `<rect width="512" height="512" fill="#12151a"/>` +
+          `<g fill="none" stroke="${accent}" stroke-width="48" stroke-linecap="round" stroke-linejoin="round">` +
+          `<polyline points="184,176 300,256 184,336"/><line x1="316" y1="336" x2="372" y2="336"/>` +
+          `</g></svg>`;
+        const icon = document.querySelector('link[rel="icon"]');
+        if (icon)
+          icon.setAttribute(
+            "href",
+            "data:image/svg+xml," + encodeURIComponent(svg),
+          );
+      })();
+
+      // Resolve the dictionary from the browser's top-preferred language using a
+      // BCP 47 merge chain (en base → language → script/region variants), the
+      // same scheme as the server's i18n.mjs. The script subtag (Hans/Hant) is
+      // inferred from the region via Intl.Locale.maximize(), so zh-TW prefers a
+      // Traditional Chinese file when one exists. Files that 404 are skipped, and
+      // missing keys fall through to the less-specific layers (ultimately en).
+      function localeMergeList(pref) {
+        let loc;
+        try {
+          loc = new Intl.Locale(pref);
+        } catch {
+          const b = String(pref || "")
+            .split("-")[0]
+            .toLowerCase();
+          return b ? ["en", b] : ["en"];
+        }
+        let max = loc;
+        try {
+          max = loc.maximize();
+        } catch {
+          /* keep loc */
+        }
+        const lang = loc.language;
+        const script = loc.script || max.script;
+        const region = loc.region;
+        const list = ["en", lang]; // least specific first
+        if (script) list.push(`${lang}-${script}`);
+        if (region) list.push(`${lang}-${region}`);
+        if (script && region) list.push(`${lang}-${script}-${region}`);
+        return [...new Set(list)];
+      }
+      let messages = {};
+      const t = (key, vars = {}) => {
+        let value = messages[key] ?? key;
+        for (const [name, replacement] of Object.entries(vars))
+          value = value.replaceAll(`{${name}}`, String(replacement));
+        return value;
+      };
+      // The browser's preferred BCP 47 tag. Used both to build the message
+      // merge chain and, directly, for Intl date/time formatting (Intl resolves
+      // region/script subtags itself, so the full tag is fine here).
+      const LOCALE = navigator.languages?.[0] || navigator.language || "en";
+      const mergeList = localeMergeList(LOCALE);
+      const localeReady = Promise.all(
+        mergeList.map((name) =>
+          fetch(`/locales/${name}.json`)
+            .then((r) => (r.ok ? r.json().then((d) => ({ name, d })) : null))
+            .catch(() => null),
+        ),
+      ).then((results) => {
+        // Overlay in ascending specificity; the most specific file that loaded
+        // wins per key and sets <html lang>.
+        let effective = "en";
+        for (const r of results)
+          if (r) {
+            messages = { ...messages, ...r.d };
+            effective = r.name;
+          }
+        document.documentElement.lang = effective;
+      });
+
+      function applyTranslations() {
+        document.querySelectorAll("[data-i18n]").forEach((el) => {
+          el.textContent = t(el.dataset.i18n);
+        });
+        document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+          el.placeholder = t(el.dataset.i18nPlaceholder);
+        });
+        document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+          el.title = t(el.dataset.i18nTitle);
+        });
+      }
+
+      const $ = (id) => document.getElementById(id);
+
+      // crypto.randomUUID() is limited to secure contexts (https / localhost).
+      // The glasses pairing URL is a non-secure origin http://<LAN-IP>, so
+      // randomUUID is undefined and throws. getRandomValues works even on non-secure
+      // origins, so we build a v4 UUID with it.
+      function uuid() {
+        if (crypto.randomUUID) return crypto.randomUUID();
+        const b = crypto.getRandomValues(new Uint8Array(16));
+        b[6] = (b[6] & 0x0f) | 0x40;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+        return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+      }
+      const log = $("log"),
+        stateEl = $("state"),
+        banner = $("banner");
+      const usageEl = $("usage"),
+        usagePopup = $("usagePopup");
+
+      // ── Auto-scroll control ────────────────────────────────
+      // Jumping to the bottom on every streamed response would kick the user out while they are
+      // reading an earlier reply. So we follow along only "when the user is looking near the bottom",
+      // and when they are reading higher up (the bottom is not visible) we only update the buffer.
+      // stick is updated on the scroll event. A programmatic auto-scroll also fires scroll, but since
+      // it stays at the bottom, stick remains true.
+      let stick = true;
+      const NEAR_BOTTOM = 48; // px. Within this range we treat it as "looking at the bottom".
+      log.addEventListener("scroll", () => {
+        stick =
+          log.scrollHeight - log.scrollTop - log.clientHeight <= NEAR_BOTTOM;
+      });
+      // Go to the bottom only while following. Otherwise keep the current scroll position.
+      function autoScroll() {
+        if (stick) log.scrollTop = log.scrollHeight;
+      }
+      let sid = null,
+        es = null,
+        cwd = null,
+        block = null,
+        t0 = 0,
+        timer = null;
+      // The model the user "explicitly" chose on this screen (empty = unselected = auto). At send time,
+      // if this is non-empty it is put on body.model. It is separate from the pulldown's displayed value:
+      // when the currently effective model is merely being shown, it stays empty — so that something not
+      // specified is not sent back as if specified. Switching conversations resets it to unselected.
+      let selectedModel = "";
+      let lastActivityAt = 0,
+        activityKind = null,
+        stallWarnMs = 120000;
+      let sessionReadOnly = false,
+        readOnlyTimer = null,
+        readOnlyCursor = "",
+        readOnlyLoading = false;
+      // The maximum id among received SSE frames. On reconnect, used to have the server resend only
+      // frames after this, catching up on missed screen updates (and pending-response dialogs).
+      let lastEventId = 0;
+      // The server session instance's epoch, learned from the stream_meta frame. We echo it back on
+      // reconnect so the server can tell whether our lastEventId still belongs to the live instance;
+      // if not (restart) or if the events we missed were trimmed from the ring buffer, it asks us to
+      // resync (full history reload) instead of letting the dedup guard silently drop new events.
+      let streamEpoch = "";
+      let activeQuestion = null; // The pending inline question card (for finalize)
+      let activePermission = null; // The pending inline permission card (for finalize)
+      let toolGroup = null; // <details> grouping consecutive tool_end entries. Closed and ended when non-tool output arrives.
+      let allSessions = []; // The most recently fetched list. cwd filtering redraws from here without refetching.
+      let showArchived = false;
+      try {
+        showArchived = localStorage.getItem(LS_SHOW_ARCHIVED_KEY) === "1";
+      } catch {}
+      const sessionLiveness = new Map(); // Values from the list fetch + SSE deltas for the currently open session
+      let label = "",
+        waiting = false; // waiting = awaiting the user's response
+      let usageRequest = 0;
+      // Local backends have no 5h/1w rate windows, so those two slots are repurposed to show
+      // actual token counts (used / max). In that mode the slots are not reset-time popups.
+      let usageTokenMode = false;
+
+      // Usage tiers. Thresholds at 50% / 80%. Boundary values belong to the higher tier (50→warn, 80→crit).
+      // The icon also shows usage by fill amount: ◔ (low) → ◑ (medium) → ● (full).
+      const USAGE_LEVELS = [
+        { max: 50, cls: "u-ok", icon: "◔" },
+        { max: 80, cls: "u-warn", icon: "◑" },
+        { max: Infinity, cls: "u-crit", icon: "●" },
+      ];
+      function renderUsage(el, name, value) {
+        if (!Number.isFinite(value)) {
+          el.textContent = `${name}:—`;
+          el.className = "";
+          return;
+        }
+        const level =
+          USAGE_LEVELS.find((l) => value < l.max) ??
+          USAGE_LEVELS[USAGE_LEVELS.length - 1];
+        el.textContent = `${name} ${level.icon} ${Math.round(value)}%`;
+        el.className = level.cls;
+      }
+      const resetDateFormat = new Intl.DateTimeFormat(LOCALE, {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+      // Compact token count: 512, 3.4k, 12k, 128k. Non-finite → em dash.
+      function fmtTokens(n) {
+        if (!Number.isFinite(n)) return "—";
+        if (n < 1000) return String(n);
+        const k = n / 1000;
+        return (k < 10 ? k.toFixed(1) : Math.round(k)) + "k";
+      }
+      // The traffic-light tier for a percentage, without touching the text.
+      function usageTier(value) {
+        if (!Number.isFinite(value)) return "";
+        return (
+          USAGE_LEVELS.find((l) => value < l.max) ??
+          USAGE_LEVELS[USAGE_LEVELS.length - 1]
+        ).cls;
+      }
+      function showUsage(data) {
+        if (!data?.available) {
+          usageEl.hidden = true;
+          usagePopup.hidden = true;
+          usageTokenMode = false;
+          return;
+        }
+        renderUsage($("contextUsage"), "Ctx", data.context?.utilization);
+        // Local: show used / max tokens in place of the 5h/1w rate windows.
+        if (data.tokens) {
+          usageTokenMode = true;
+          const used = $("fiveHourUsage"),
+            max = $("sevenDayUsage");
+          used.textContent = `Tok ${fmtTokens(data.tokens.used)}`;
+          // color the load, not the ceiling; "tokval" drops the clickable underline
+          used.className = [usageTier(data.context?.utilization), "tokval"]
+            .filter(Boolean)
+            .join(" ");
+          max.textContent = `Max ${fmtTokens(data.tokens.max)}`;
+          max.className = "tokval";
+          used.dataset.reset = "";
+          max.dataset.reset = "";
+          usageEl.hidden = false;
+          return;
+        }
+        usageTokenMode = false;
+        renderUsage($("fiveHourUsage"), "5h", data.fiveHour?.utilization);
+        renderUsage($("sevenDayUsage"), "1w", data.sevenDay?.utilization);
+        $("fiveHourUsage").dataset.reset = data.fiveHour?.resetsAt || "";
+        $("sevenDayUsage").dataset.reset = data.sevenDay?.resetsAt || "";
+        usageEl.hidden = false;
+      }
+      async function loadUsage(id) {
+        const request = ++usageRequest;
+        try {
+          // Pass cwd too. Fetching usage opens a persistent backend connection (a child process), so
+          // unless cwd is conveyed here before the first send of a new session, the child process gets
+          // fixed and cached at the launch directory.
+          const r = await api(
+            `/api/usage?sessionId=${encodeURIComponent(id)}&provider=${encodeURIComponent(PROVIDER)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}`,
+          );
+          const data = await r.json();
+          if (sid === id && request === usageRequest) showUsage(data);
+        } catch {
+          if (sid === id && request === usageRequest) showUsage(null);
+        }
+      }
+      function openUsagePopup(button, label) {
+        const raw = button.dataset.reset;
+        let reset = t("usage.resetUnavailable");
+        if (raw) {
+          const date = new Date(raw);
+          if (!Number.isNaN(date.getTime()))
+            reset = t("usage.reset", { date: resetDateFormat.format(date) });
+        }
+        usagePopup.textContent = `${label} ${reset}`;
+        usagePopup.hidden = false;
+        const rect = button.getBoundingClientRect(),
+          popup = usagePopup.getBoundingClientRect();
+        usagePopup.style.left = `${Math.max(10, Math.min(innerWidth - popup.width - 10, rect.right - popup.width))}px`;
+        usagePopup.style.top = `${Math.max(10, rect.top - popup.height - 7)}px`;
+      }
+      $("fiveHourUsage").addEventListener("click", (e) => {
+        if (usageTokenMode) return; // token slot: no reset-time popup
+        e.stopPropagation();
+        openUsagePopup(e.currentTarget, t("usage.fiveHour"));
+      });
+      $("sevenDayUsage").addEventListener("click", (e) => {
+        if (usageTokenMode) return; // token slot: no reset-time popup
+        e.stopPropagation();
+        openUsagePopup(e.currentTarget, t("usage.sevenDay"));
+      });
+      document.addEventListener("click", () => {
+        usagePopup.hidden = true;
+      });
+
+      if (!TOKEN) {
+        banner.hidden = false;
+        banner.textContent = t("error.missingToken");
+      }
+
+      const api = (path, opts = {}) =>
+        fetch(path, {
+          ...opts,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + TOKEN,
+            ...(opts.headers || {}),
+          },
+        });
+
+      // ── Display ──────────────────────────────────────────────
+      function line(cls, text) {
+        // line() is for non-tool output (utterances, notifications, errors, etc.). When it is called, the
+        // in-progress tool group is ended (= the next set of tools starts as a separate chronological block).
+        endToolGroup();
+        const div = document.createElement("div");
+        div.className = cls;
+        div.textContent = text;
+        log.appendChild(div);
+        autoScroll();
+        return div;
+      }
+
+      // Stack completed tool executions inline in chronological order. Consecutive ones are grouped into a
+      // single <details>, collapsed by default to show just a one-line summary (a list of tool names). If
+      // non-tool output such as a text reply intervenes, endToolGroup() ends it and the next execution goes into a separate group.
+      function pushTool(name, summary) {
+        if (!toolGroup) {
+          const d = document.createElement("details");
+          d.className = "tools";
+          const sum = document.createElement("summary");
+          const body = document.createElement("div");
+          body.className = "tools-body";
+          d.append(sum, body);
+          log.appendChild(d);
+          toolGroup = { sum, body, names: [] };
+        }
+        toolGroup.names.push(name);
+        const row = document.createElement("div");
+        row.className = "tool-row";
+        // If summary equals the name (the current default), show only the tool name; if there is detail, show both.
+        row.textContent =
+          summary && summary !== name ? `${name} · ${summary}` : name;
+        toolGroup.body.appendChild(row);
+        // The one-line heading when collapsed. For a single item the tool name, for multiple the count + list of names (ellipsis via CSS).
+        const n = toolGroup.names.length;
+        toolGroup.sum.textContent =
+          n === 1
+            ? `🔧 ${toolGroup.names[0]}`
+            : `🔧 ${t("tools.count", { count: n })} · ${toolGroup.names.join(", ")}`;
+        autoScroll();
+      }
+      // Close the group when non-tool output arrives (the next tool_end creates a new group).
+      function endToolGroup() {
+        toolGroup = null;
+      }
+
+      // ── Markdown rendering ──────────────────────────────────────
+      // The assistant's response is "plain text during streaming, turned into Markdown on completion".
+      // LLM output is untrusted (prompt injection), so it always goes through DOMPurify before innerHTML.
+      // When the library is not loaded, it falls back to plain text.
+      if (window.marked) marked.setOptions({ gfm: true, breaks: true });
+
+      function renderMarkdown(el, raw) {
+        if (!window.marked || !window.DOMPurify) {
+          el.textContent = raw;
+          return;
+        }
+        try {
+          el.innerHTML = DOMPurify.sanitize(marked.parse(raw));
+          el.classList.add("md");
+          enhanceCode(el);
+        } catch {
+          el.textContent = raw;
+        }
+      }
+
+      // Turn only the contents of custom tags appended to the prompt, such as <recommended_plugins>,
+      // into Markdown. Ordinary user input and standard HTML tags stay as plain text.
+      function renderUserText(el, raw) {
+        const segments = window.TaggedMarkdown?.split(raw) || [];
+        if (!segments.some((part) => part.type === "tag")) return;
+        el.textContent = "";
+        el.classList.add("tagged");
+        if (
+          segments.every((part) => part.type === "tag" || !part.content.trim())
+        ) {
+          el.classList.add("metadata-only");
+        }
+        for (const part of segments) {
+          if (part.type === "text") {
+            const plain = document.createElement("span");
+            plain.className = "tagged-plain";
+            plain.textContent = part.content;
+            el.appendChild(plain);
+            continue;
+          }
+          const section = document.createElement("section");
+          section.className = "tagged-block";
+          const title = document.createElement("div");
+          title.className = "tagged-title";
+          title.textContent = part.tag;
+          const body = document.createElement("div");
+          if (!renderXmlMetadata(body, part.content))
+            renderMarkdown(body, part.content);
+          section.append(title, body);
+          el.appendChild(section);
+        }
+      }
+
+      // When the tag's contents are themselves structured metadata, as with environment_context or
+      // task-notification, display them as a hierarchical "field name / value" tree rather than as the
+      // tag notation itself. Parsing is delegated to TaggedMarkdown.parseTree (lenient tag parsing rather
+      // than strict XML, so it doesn't break on free-text values containing & or <, such as summary/note/result).
+      function renderXmlMetadata(root, raw) {
+        const tree = window.TaggedMarkdown?.parseTree?.(raw);
+        if (!tree || !tree.length) return false;
+
+        root.className = "xml-tree";
+        const appendNode = (parent, node) => {
+          const wrap = document.createElement("div");
+          wrap.className = "xml-node";
+          const row = document.createElement("div");
+          row.className = "xml-row";
+          const key = document.createElement("span");
+          key.className = "xml-key";
+          key.textContent = node.tag;
+          row.appendChild(key);
+          if (node.children) {
+            if (node.attrs) {
+              const attrs = document.createElement("span");
+              attrs.className = "xml-attrs";
+              attrs.textContent = node.attrs;
+              row.appendChild(attrs);
+            }
+          } else {
+            const value = document.createElement("span");
+            value.className = "xml-value";
+            value.textContent = node.attrs
+              ? `${node.attrs}${node.value ? " · " + node.value : ""}`
+              : node.value;
+            row.appendChild(value);
+          }
+          wrap.appendChild(row);
+          if (node.children)
+            for (const child of node.children) appendNode(wrap, child);
+          parent.appendChild(wrap);
+        };
+        for (const node of tree) appendNode(root, node);
+        return true;
+      }
+
+      function userLine(text) {
+        const el = line("user", text);
+        renderUserText(el, text);
+        return el;
+      }
+
+      // Highlight code blocks by language. ```diff / ```patch are replaced with a GitLab-style
+      // line-by-line view via diff2html.
+      function enhanceCode(root) {
+        root.querySelectorAll("pre > code").forEach((code) => {
+          const m = (code.className || "").match(/language-([\w+-]+)/);
+          const lang = m ? m[1].toLowerCase() : "";
+          if ((lang === "diff" || lang === "patch") && window.Diff2Html)
+            return renderDiff(code);
+          if (window.hljs) {
+            try {
+              hljs.highlightElement(code);
+            } catch {}
+          }
+        });
+      }
+
+      function renderDiff(code) {
+        const pre = code.closest("pre");
+        try {
+          const html = Diff2Html.html(code.textContent, {
+            drawFileList: false,
+            matching: "lines",
+            outputFormat: "line-by-line",
+            colorScheme: "dark",
+          });
+          const wrap = document.createElement("div");
+          wrap.className = "d2h-wrap";
+          wrap.innerHTML = DOMPurify.sanitize(html);
+          pre.replaceWith(wrap);
+        } catch {
+          if (window.hljs) {
+            try {
+              hljs.highlightElement(code);
+            } catch {}
+          }
+        }
+      }
+      function durationText(ms) {
+        const secs = Math.max(0, Math.floor(ms / 1000));
+        return secs < 60
+          ? `${secs}s`
+          : `${Math.floor(secs / 60)}m${secs % 60 ? `${secs % 60}s` : ""}`;
+      }
+      function paintState() {
+        const secs = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
+        // The elapsed seconds are driven by a local timer. Matched to the same behavior as the original app.
+        const el = t0
+          ? `  ${secs < 60 ? secs + "s" : Math.floor(secs / 60) + "m" + (secs % 60) + "s"}`
+          : "";
+        let live = "";
+        if (t0 && lastActivityAt && !waiting) {
+          const quietMs = Math.max(0, Date.now() - lastActivityAt);
+          const noActivityMs = stallWarnMs > 0 ? stallWarnMs : 120000;
+          if (quietMs >= noActivityMs)
+            live = ` · ${t("liveness.noActivity", { time: durationText(quietMs) })}`;
+          else if (quietMs >= 30000)
+            live = ` · ${t("liveness.quiet", { time: durationText(quietMs) })}`;
+        }
+        stateEl.textContent = label + el + live;
+        stateEl.className = waiting ? "wait" : "";
+      }
+      function running(on, text, live = null) {
+        waiting = false;
+        label = on ? text || t("state.running") : t("state.waitingInput");
+        $("stop").disabled = !on;
+        // The epoch values from /api/status always take precedence over local values that mistook an SSE
+        // replay for "activity that just arrived". This also lets us restore the original start time / last activity time on reconnect.
+        if (on && live) {
+          if (Number.isFinite(live.startedAt)) t0 = live.startedAt;
+          if (Number.isFinite(live.lastActivityAt))
+            lastActivityAt = live.lastActivityAt;
+          activityKind = live.activityKind ?? activityKind;
+          if (Number.isFinite(live.stallWarnMs)) stallWarnMs = live.stallWarnMs;
+        }
+        if (on && !t0) {
+          t0 = Date.now();
+          lastActivityAt = t0;
+          activityKind = "turn_start";
+        }
+        if (on && !timer) {
+          timer = setInterval(paintState, 1000);
+        }
+        if (!on) {
+          t0 = 0;
+          lastActivityAt = 0;
+          activityKind = null;
+          clearInterval(timer);
+          timer = null;
+        }
+        paintState();
+        paintArchiveAction();
+      }
+      function backgroundRunning(count) {
+        waiting = false;
+        label = t("state.background", {
+          count: count > 1 ? ` (${count})` : "",
+        });
+        t0 = 0;
+        lastActivityAt = 0;
+        activityKind = null;
+        clearInterval(timer);
+        timer = null;
+        $("stop").disabled = false;
+        paintState();
+        paintArchiveAction();
+      }
+      // The state where we are waiting for the user's response. It does not time out, so
+      // we keep showing in the status row that we are waiting.
+      function waitingForUser(kind) {
+        waiting = true;
+        const what =
+          kind === "permission" ? t("state.permission") : t("state.question");
+        label = t("state.waitingAnswer", { what });
+        $("stop").disabled = false;
+        if (!t0) {
+          t0 = Date.now();
+          timer = setInterval(paintState, 1000);
+        }
+        paintState();
+        paintArchiveAction();
+      }
+
+      // ── SSE ───────────────────────────────────────────────
+      // Open a different session. Wipe the log and reset state, then open a fresh SSE connection.
+      function connect(id, readOnly = false) {
+        clearInterval(readOnlyTimer);
+        readOnlyTimer = null;
+        readOnlyCursor = "";
+        readOnlyLoading = false;
+        log.textContent = "";
+        stick = true; // When opening a different session, start stuck to the bottom
+        block = null;
+        activeQuestion = null; // Drop the previous session's question card reference (its DOM is already discarded)
+        activePermission = null; // Same as above (permission card)
+        endToolGroup(); // Drop the previous session's tool group reference (its DOM is already discarded)
+        running(false);
+        usageEl.hidden = true;
+        usagePopup.hidden = true;
+        sid = id;
+        sessionReadOnly = readOnly;
+        lastEventId = 0; // New session, so reset the catch-up baseline too
+        streamEpoch = ""; // New session: forget the previous instance's epoch (a fresh connect never resyncs)
+        // Reset the explicit selection per conversation (don't carry over and send what was chosen in the previous one).
+        // showBackend makes the display follow this conversation's remembered model.
+        selectedModel = "";
+        showBackend(); // Reflect connection info and model selection immediately (don't wait for the 15s interval)
+        openStream(id);
+        setReady(!readOnly);
+        loadHistory(id, false, readOnly);
+        loadState(id);
+        loadUsage(id);
+        if (readOnly)
+          readOnlyTimer = setInterval(
+            () => loadHistory(id, false, true),
+            15000,
+          );
+      }
+
+      // Open an SSE connection (closing any existing one first). If lastEventId is set, have the server
+      // resend only frames after that id to catch up on what was missed (used by reopenStream on foreground restore).
+      // When via connect() (lastEventId=0), connect fresh. The log and any in-progress block are not touched here.
+      function openStream(id) {
+        es?.close();
+        // EventSource cannot send headers, so the token is passed via query (the same constraint as the original).
+        // Note that EventSource auto-reconnects, and when it does it automatically sends the Last-Event-ID header.
+        // When we reopen ourselves, a new object cannot carry a header, so we pass lastEventId via query.
+        // Either way, the server resends "frames after that id" in order.
+        let u = `/api/events?token=${encodeURIComponent(TOKEN)}&sessionId=${encodeURIComponent(id)}`;
+        if (lastEventId) u += `&lastEventId=${lastEventId}`;
+        // Echo the epoch we last saw so the server can detect a dead-instance/gap reconnect.
+        if (streamEpoch) u += `&epoch=${encodeURIComponent(streamEpoch)}`;
+        es = new EventSource(u);
+        es.onmessage = (ev) => {
+          // Track the max received id. Only id-bearing frames update it (ev.lastEventId retains the last
+          // id seen, so it stays put on resent frames that have no id).
+          const n = ev.lastEventId ? parseInt(ev.lastEventId, 10) : 0;
+          let data;
+          try {
+            data = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          // Stream handshake (id-less, so it never advances lastEventId, and web-only). It reports the
+          // server session instance's epoch and whether incremental catch-up is viable. When the server
+          // says resync — the instance was recreated (restart) or the events we missed were trimmed from
+          // the ring buffer — trusting the delta stream would leave the dedup guard dropping every new
+          // append (user_prompt/text_delta/…) while dialogs still show. So we do a clean full reload via
+          // connect(), which wipes the log, resets lastEventId/streamEpoch, and reloads history from disk.
+          if (data.type === "stream_meta") {
+            streamEpoch = data.epoch || streamEpoch;
+            if (data.resync && sid) connect(sid, sessionReadOnly);
+            return;
+          }
+          // Events that render by appending (not idempotent) get duplicated on screen when redelivered.
+          // e.g. a body delta would read like "relatinglating…", or tool/model/user rows would produce duplicated lines.
+          // On a phone returning from background or the browser auto-reconnecting, reopening with a stale
+          // lastEventId can make the server resend already-applied events. Since these types always flow
+          // exactly once with an id, a frame no newer than the already-applied max id is treated as a redelivery and dropped.
+          // Waiting/permission/question cards, on the other hand, are resent without an id and handle() treats them
+          // idempotently via requestId etc., so they are not rejected here and are processed as-is (status is also out of scope, as reprocessing it is idempotent).
+          const appendOnce =
+            data.type === "text_delta" ||
+            data.type === "user_prompt" ||
+            data.type === "tool_end" ||
+            data.type === "result" ||
+            data.type === "notification" ||
+            data.type === "error";
+          if (appendOnce && n > 0 && n <= lastEventId) return;
+          if (n > lastEventId) lastEventId = n;
+          handle(data);
+        };
+        // The status row is redrawn every second, so replace label rather than writing textContent directly.
+        es.onerror = () => {
+          label = t("state.reconnecting");
+          waiting = false;
+          paintState();
+        };
+        es.onopen = () => {
+          if (label === t("state.reconnecting")) running(false);
+        };
+      }
+
+      // Reopen the SSE connection to catch up to the latest state. Keeping the log, in-progress block, and
+      // cards, have the server resend only frames after lastEventId. On a phone, when the browser is sent to
+      // the background, the SSE can silently drop and auto-reconnect may not fire even after returning to the
+      // foreground, so we explicitly reopen it ourselves on foreground restore.
+      function reopenStream() {
+        if (!sid) return;
+        openStream(sid);
+      }
+      // Reopen the SSE when the page returns to the foreground. If it wasn't dropped, the server resends
+      // zero frames, so no extra rendering happens (deltas flow only when catch-up is needed).
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          reopenStream();
+          if (sessionReadOnly && sid) loadHistory(sid, false, true);
+        }
+      });
+
+      // Reflect the state as of the moment we open/reconnect. Since SSE only carries "changes",
+      // without this, opening a running session would stay at Waiting input.
+      // If awaiting a response, the bus re-emits status:waiting on connect, which overrides it.
+      async function loadState(id) {
+        try {
+          const r = await api(
+            `/api/status?sessionId=${encodeURIComponent(id)}&provider=${encodeURIComponent(PROVIDER)}`,
+          );
+          const snapshot = await r.json();
+          sessionLiveness.set(id, snapshot);
+          paintSessionLiveness();
+          if (snapshot.state === "busy" && sid === id && !waiting)
+            running(true, null, snapshot);
+        } catch {}
+      }
+
+      async function loadHistory(id, replace = false, readOnly = false) {
+        if (readOnly && readOnlyLoading) return;
+        if (readOnly) readOnlyLoading = true;
+        try {
+          // provider is required. Without it, the request goes to the default backend, and even opening a past
+          // Claude Code session returns an empty history.
+          let u = `/api/sessions/${encodeURIComponent(id)}/history?limit=50&provider=${encodeURIComponent(PROVIDER)}`;
+          if (readOnly)
+            u += `&follow=1${readOnlyCursor ? `&cursor=${encodeURIComponent(readOnlyCursor)}` : ""}`;
+          const r = await api(u);
+          const body = await r.json();
+          const { history = [] } = body;
+          if (readOnly) {
+            if (body.cursor) readOnlyCursor = body.cursor;
+            if (body.unchanged) return;
+            if (body.replace) log.textContent = "";
+          } else if (replace) log.textContent = "";
+          for (const m of history) {
+            // Agent questions (+ answers) are restored as the same card as live, in readonly.
+            // Questions left unanswered are not shown — those awaiting a response are re-emitted as the current
+            // card by the SSE side, so we avoid showing them a second time in an "answered"-like form from history.
+            if (m.kind === "question") {
+              if (!m.answers || !Object.keys(m.answers).length) continue;
+              const state = buildQuestionCard(m.questions || []);
+              log.appendChild(state.card);
+              finalizeQuestion(state, m.answers, false);
+              continue;
+            }
+            if (m.role === "user") {
+              userLine(m.text);
+              continue;
+            }
+            renderMarkdown(line("assistant", ""), m.text); // Turn past assistant utterances into Markdown too
+          }
+          if (readOnly && (body.replace || !readOnlyCursor))
+            line("dim", t("history.readOnly"));
+        } catch {
+        } finally {
+          if (readOnly) readOnlyLoading = false;
+        }
+      }
+
+      function handle(e) {
+        const activity =
+          e.type === "text_delta" ||
+          e.type === "tool_start" ||
+          e.type === "tool_end" ||
+          e.type === "result"
+            ? e.type
+            : e.type === "status" &&
+                ["think_start", "think_end", "text_start", "text_end"].includes(
+                  e.state,
+                )
+              ? e.state
+              : null;
+        if (activity && t0 && !waiting) {
+          lastActivityAt = Date.now();
+          activityKind = activity;
+          if (sid)
+            sessionLiveness.set(sid, {
+              state: "busy",
+              startedAt: t0,
+              lastActivityAt,
+              activityKind,
+              stallWarnMs,
+            });
+        }
+        switch (e.type) {
+          case "user_prompt":
+            block = null;
+            userLine(e.text);
+            break;
+          case "status":
+            if (e.state === "busy") {
+              running(true);
+              if (sid)
+                sessionLiveness.set(sid, {
+                  state: "busy",
+                  startedAt: t0,
+                  lastActivityAt,
+                  activityKind,
+                  stallWarnMs,
+                });
+            }
+            // A background agent is running (an extension). As distinct from a foreground turn, set the bottom
+            // line to "running in background" so it can be told apart from completion/stop (returning to idle).
+            else if (e.state === "background") {
+              backgroundRunning(e.count);
+              if (sid) sessionLiveness.set(sid, { state: "background" });
+            } else if (e.state === "think_start")
+              running(true, t("state.thinking"));
+            else if (e.state === "think_end") running(true);
+            else if (e.state === "text_start") {
+              running(true, t("state.responding"));
+              block = line("assistant", "");
+              block._raw = "";
+            } else if (e.state === "text_end") {
+              if (block) renderMarkdown(block, block._raw);
+              block = null;
+            }
+            // Render without dropping anything even when idle is reached without a text_end (e.g. on interrupt).
+            else if (e.state === "idle") {
+              if (block) {
+                renderMarkdown(block, block._raw);
+                block = null;
+              }
+              running(false);
+              if (sid) sessionLiveness.set(sid, { state: "idle" });
+              if (sid) loadUsage(sid); // Update to the latest context / plan usage after the turn completes
+              // Also update the model display after the turn completes, to reflect a model specified by another
+              // client (CLI, glasses) in the pulldown without waiting for the 15s polling.
+              if (sid) showBackend();
+            } else if (e.state === "waiting") {
+              waitingForUser(e.waitingFor);
+              if (sid) sessionLiveness.set(sid, { state: "waiting" });
+            }
+            break;
+          case "text_delta":
+            if (!block) {
+              block = line("assistant", "");
+              block._raw = "";
+            }
+            // Accumulate raw text in _raw; during streaming, display it in plain monospace only (turned into Markdown on completion).
+            block._raw += e.text;
+            block.textContent = block._raw;
+            autoScroll();
+            break;
+          case "tool_end":
+            pushTool(e.name, e.summary ?? "");
+            break;
+          // Turn complete. If the concrete model ID actually used is available (an extension), leave a dim one-liner.
+          // This shows what an alias ("opus") resolved to.
+          case "result":
+            if (e.model) line("dim", `> model: ${e.model}`);
+            break;
+          case "notification":
+            line(
+              "dim",
+              e.key === "waiting"
+                ? `> ${t("notification.waiting")}`
+                : `> ${e.title ?? ""} ${e.message ?? ""}`,
+            );
+            break;
+          case "error":
+            line("err", e.message ?? "error");
+            break;
+          case "permission_request":
+            askPermission(e);
+            break;
+          case "user_question":
+            askQuestion(e);
+            break;
+          // The response is settled by the first one to arrive. Whether resolved by ourselves, another client,
+          // or an interrupt, the inline permission card that was shown is set to its finalized view, leaving
+          // "what was asked + the result". Only when there is no card (a miss) do we fall back to the old dim one-liner.
+          case "permission_result": {
+            if (activePermission) {
+              finalizePermission(activePermission, e.decision, e.cancelled);
+              activePermission = null;
+            } else if (e.cancelled) {
+              line("dim", `> ${t("result.cancelled")}`);
+            }
+            break;
+          }
+          // Once the answer to a question is settled, set the inline question card that was shown to its finalized view.
+          // Whether resolved by ourselves, another client, or an interrupt, this single path keeps "what was asked +
+          // what was answered" on screen. Only when there is no card (a miss) do we fall back to the old one-liner.
+          case "question_answer": {
+            if (activeQuestion) {
+              finalizeQuestion(activeQuestion, e.answers, e.cancelled);
+              activeQuestion = null;
+            } else if (e.cancelled) {
+              line("dim", `> ${t("result.cancelled")}`);
+            } else {
+              const vals = Object.values(e.answers ?? {}).filter(
+                (v) => typeof v === "string" && v.trim(),
+              );
+              line(
+                vals.length ? "user" : "dim",
+                vals.length ? vals.join("\n") : `> ${t("result.responded")}`,
+              );
+            }
+            break;
+          }
+        }
+      }
+
+      // ── Permissions / questions ────────────────────────────────────────
+      // Permission request. Like the question card, a card is placed at the end of the log and the options
+      // (Yes/No etc.) are wired up. The finalized view is unified into finalizePermission via the
+      // permission_result event (so it is kept via the same path whether resolved by ourselves, another client, or an interrupt).
+      function askPermission(e) {
+        endToolGroup();
+        // For a resend of the same unanswered request, such as a state snapshot right after a replay, reuse the
+        // already-shown card. Content typed or selected before the foreground restore is also preserved.
+        if (
+          e.requestId &&
+          activePermission?._requestId === e.requestId &&
+          !activePermission._done
+        )
+          return;
+        // Finalize the in-progress assistant utterance here and release the reference (same reason as the question
+        // card: so that continuation text_delta arriving after the answer doesn't slip into the old block above the card).
+        if (block) {
+          renderMarkdown(block, block._raw ?? "");
+          block = null;
+        }
+        // On reconnect, a pending request is re-emitted. Discard any old, unsettled card that remains.
+        if (activePermission && !activePermission._done)
+          activePermission.card.remove();
+
+        const card = document.createElement("div");
+        card.className = "qcard perm";
+        const head = document.createElement("div");
+        head.className = "qcard-head";
+        head.textContent = t("permission.title", {
+          tool: e.toolName ?? "",
+        }).trim();
+        card.appendChild(head);
+        const detail = [e.description, e.detail].filter(Boolean).join("\n");
+        if (detail) {
+          const t = document.createElement("div");
+          t.className = "qtext";
+          t.textContent = detail;
+          card.appendChild(t);
+        }
+        const optsWrap = document.createElement("div");
+        optsWrap.className = "qopts";
+        const btns = [];
+        for (const o of e.options ?? []) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "qopt";
+          b.textContent =
+            t(`permission.option.${o.key}`) === `permission.option.${o.key}`
+              ? (o.text ?? "")
+              : t(`permission.option.${o.key}`);
+          b.onclick = () => {
+            // Disable all buttons the moment one is pressed (to prevent double-press and mis-clicking other options).
+            // The actual finalized view is done in finalizePermission after waiting for permission_result.
+            for (const [, bb] of btns) bb.disabled = true;
+            api("/api/permission-response", {
+              method: "POST",
+              body: JSON.stringify({
+                sessionId: sid,
+                decision: o.key,
+                provider: PROVIDER,
+              }),
+            });
+          };
+          optsWrap.appendChild(b);
+          btns.push([o.key, b]);
+        }
+        card.appendChild(optsWrap);
+        log.appendChild(card);
+        autoScroll();
+        activePermission = { card, btns, _requestId: e.requestId };
+      }
+
+      // Set the permission card to its finalized (readonly) view. Emphasize the chosen result and leave the result in the footer.
+      // decision is the bus-side normalized value (always / allowed / denied).
+      function finalizePermission(state, decision, cancelled) {
+        if (!state || state._done) return;
+        state._done = true;
+        state.card.classList.add("done");
+        // Map the normalized decision back to the card's button keys (allowAlways/allow/deny).
+        const keyOf = {
+          always: "allowAlways",
+          allowed: "allow",
+          denied: "deny",
+        };
+        const chosenKey = keyOf[decision];
+        for (const [key, b] of state.btns) {
+          b.disabled = true;
+          if (!cancelled && key === chosenKey) b.classList.add("chosen");
+          else b.classList.remove("chosen");
+        }
+        const foot = document.createElement("div");
+        const label = cancelled
+          ? t("result.cancelled")
+          : decision === "denied"
+            ? t("permission.denied")
+            : decision === "always"
+              ? t("permission.alwaysAllowed")
+              : t("permission.allowed");
+        foot.className =
+          "qcard-foot" + (cancelled || decision === "denied" ? " deny" : "");
+        foot.textContent = label;
+        state.card.appendChild(foot);
+        autoScroll();
+      }
+
+      // Build only the skeleton (DOM) of the agent's question card. Shared by live (askQuestion) and
+      // history restore (loadHistory). Only the live side wires behavior onto the buttons/submit.
+      // Return value: { card, qEls:[{q, btns:[[label,btn]], ta}], submitBtn }
+      function buildQuestionCard(questions) {
+        const card = document.createElement("div");
+        card.className = "qcard";
+        const head = document.createElement("div");
+        head.className = "qcard-head";
+        head.textContent = t("question.title");
+        card.appendChild(head);
+        const qEls = [];
+        for (const q of questions) {
+          const blk = document.createElement("div");
+          blk.className = "qblock";
+          if (q.header) {
+            const h = document.createElement("div");
+            h.className = "qhdr";
+            h.textContent = q.header;
+            blk.appendChild(h);
+          }
+          if (q.question) {
+            const t = document.createElement("div");
+            t.className = "qtext";
+            t.textContent = q.question;
+            blk.appendChild(t);
+          }
+          const optsWrap = document.createElement("div");
+          optsWrap.className = "qopts";
+          const btns = [];
+          for (const o of q.options ?? []) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "qopt";
+            b.appendChild(document.createTextNode(o.label ?? ""));
+            if (o.description) {
+              const s = document.createElement("small");
+              s.textContent = o.description;
+              b.appendChild(s);
+            }
+            optsWrap.appendChild(b);
+            btns.push([o.label ?? "", b]);
+          }
+          if (btns.length) blk.appendChild(optsWrap);
+          const ta = document.createElement("textarea");
+          ta.className = "qfree";
+          ta.rows = 2;
+          ta.placeholder = btns.length
+            ? t("question.customAnswer")
+            : t("question.answerPlaceholder");
+          blk.appendChild(ta);
+          qEls.push({ q, btns, ta });
+          card.appendChild(blk);
+        }
+        const submitBtn = document.createElement("button");
+        submitBtn.type = "button";
+        submitBtn.className = "qsubmit primary";
+        submitBtn.textContent = t("question.submit");
+        submitBtn.disabled = true;
+        card.appendChild(submitBtn);
+        return { card, qEls, submitBtn };
+      }
+
+      // The live question. Place the card at the end of the log and wire up the options/free-text/submit.
+      // The actual finalized view is unified into finalizeQuestion via the question_answer event
+      // (so it is kept via the same path whether resolved by ourselves, another client, or an interrupt).
+      function askQuestion(e) {
+        endToolGroup();
+        // For a resend of the same pending request, keep the existing card so an in-progress free answer or selection isn't lost.
+        if (
+          e.requestId &&
+          activeQuestion?._requestId === e.requestId &&
+          !activeQuestion._done
+        )
+          return;
+        // Finalize the in-progress assistant utterance (the preamble before the question) here and release the reference.
+        // Otherwise, continuation text_delta arriving after the answer would be appended to the old block above the
+        // question card, and the agent's reply would appear "above" the question and answer.
+        // By cutting the block, the continuation is stacked as a new block below the card, and
+        // autoScroll makes the Q&A scroll up.
+        if (block) {
+          renderMarkdown(block, block._raw ?? "");
+          block = null;
+        }
+        // On reconnect, a pending question is re-emitted. Discard any old, unsettled card that remains
+        // (as with the permission card, to prevent cards from being stacked twice by a catch-up resend).
+        if (activeQuestion && !activeQuestion._done)
+          activeQuestion.card.remove();
+        const state = buildQuestionCard(e.questions ?? []);
+        state._requestId = e.requestId;
+        const sel = {}; // question → chosen option label
+        const effective = (qe) =>
+          qe.ta.value.trim() || sel[qe.q.question] || "";
+        const refresh = () => {
+          state.submitBtn.disabled = !state.qEls.every((qe) => effective(qe));
+        };
+        for (const qe of state.qEls) {
+          for (const [labelTxt, b] of qe.btns) {
+            b.onclick = () => {
+              // Options and free-text are mutually exclusive. Reselecting clears the free-text.
+              sel[qe.q.question] = labelTxt;
+              qe.ta.value = "";
+              for (const [, bb] of qe.btns)
+                bb.classList.toggle("chosen", bb === b);
+              refresh();
+            };
+          }
+          qe.ta.oninput = () => {
+            // Typing free-text clears the option selection (signaling an alternative proposal).
+            if (qe.ta.value.trim()) {
+              delete sel[qe.q.question];
+              for (const [, bb] of qe.btns) bb.classList.remove("chosen");
+            }
+            refresh();
+          };
+        }
+        state.submitBtn.onclick = () => {
+          const answers = {};
+          for (const qe of state.qEls) answers[qe.q.question] = effective(qe);
+          state.submitBtn.disabled = true;
+          // answer is sent as "double-encoded, JSON stringified" (the same shape as the original app).
+          api("/api/question-response", {
+            method: "POST",
+            body: JSON.stringify({
+              sessionId: sid,
+              answer: JSON.stringify(answers),
+              provider: PROVIDER,
+            }),
+          });
+        };
+        log.appendChild(state.card);
+        autoScroll();
+        activeQuestion = state;
+      }
+
+      // Set the question card to its finalized (readonly) view. Emphasize the chosen option, and if answered
+      // via free-text, keep that text. Shared by live finalization (question_answer) and history restore.
+      function finalizeQuestion(state, answers, cancelled) {
+        if (!state || state._done) return;
+        state._done = true;
+        state.card.classList.add("done");
+        for (const qe of state.qEls) {
+          const ans = answers?.[qe.q.question];
+          qe.ta.disabled = true;
+          let matched = false;
+          for (const [labelTxt, b] of qe.btns) {
+            b.disabled = true;
+            if (!cancelled && ans != null && labelTxt === ans) {
+              b.classList.add("chosen");
+              matched = true;
+            } else b.classList.remove("chosen");
+          }
+          // Keep the text only for an answer that doesn't match an option (free-text). Empty or already-selected
+          // free-text fields are collapsed to keep the finalized look clean.
+          if (!cancelled && !matched && ans != null && String(ans).trim()) {
+            qe.ta.value = ans;
+          } else {
+            qe.ta.remove();
+          }
+        }
+        if (state.submitBtn) state.submitBtn.remove();
+        const foot = document.createElement("div");
+        foot.className = "qcard-foot" + (cancelled ? " cancel" : "");
+        foot.textContent = cancelled
+          ? t("result.cancelled")
+          : t("question.answered");
+        state.card.appendChild(foot);
+        autoScroll();
+      }
+
+      // ── Sessions ────────────────────────────────────────
+      // The no-session-selected state. Don't connect to one arbitrarily; let the user choose.
+      function setReady(on) {
+        $("send").disabled = !on;
+        $("input").disabled = !on;
+        if (!on) $("stop").disabled = true;
+        // Show the info panel's expand icon at the top-right of the header only while a session is open.
+        // When returning to no-selection, keep the info panel shown but hide the icon.
+        $("toggleInfo").hidden = !on;
+        if (!on) $("topInfo").hidden = false;
+      }
+      // Collapse/expand the info panel that contains connection info, input-only, and archive actions.
+      function setInfoCollapsed(on) {
+        $("topInfo").hidden = on;
+      }
+
+      // Whether it can be regarded as an absolute path. Used to decide whether to include it in the dir-scoped fetch (?cwd=).
+      function looksAbsPath(v) {
+        return /^(\/|~|[A-Za-z]:[\\/])/.test(v);
+      }
+
+      // Drop the trailing slash (keep root "/"). A session's cwd is held without a trailing /, but the value
+      // entered by picking a suggestion has a trailing / (the server appends it), so matching them directly with
+      // includes() means "…/urdwell/" doesn't match "…/urdwell" and it falls out of the suggestions/list.
+      // Normalize only for comparison/filtering purposes (fs/dirs and the dir-scoped fetch handle a trailing / as-is, so leave those alone).
+      function trimSlash(v) {
+        return v.length > 1 ? v.replace(/\/+$/, "") : v;
+      }
+
+      async function loadSessions(select) {
+        try {
+          const box = $("cwdBox").value.trim();
+          // For the suggestions (datalist) and the general list, fetch the recent list across all projects.
+          const urls = [
+            `/api/sessions?provider=${encodeURIComponent(PROVIDER)}&includeArchived=1`,
+          ];
+          // If the cwd field is an absolute path, also fetch and merge a list scoped to that directory.
+          // Equivalent to Claude's listSessions({dir}), this reliably picks up sessions that fell out of the
+          // overall recent list (stale updates). The same scope as resuming claude directly in that cwd.
+          if (looksAbsPath(box))
+            urls.push(
+              `/api/sessions?provider=${encodeURIComponent(PROVIDER)}&cwd=${encodeURIComponent(box)}&includeArchived=1`,
+            );
+          const lists = await Promise.all(
+            urls.map((u) =>
+              api(u)
+                .then((r) => r.json())
+                .then((j) => j.sessions || []),
+            ),
+          );
+          const byId = new Map(); // Dedupe by id (prefer the overall list, which comes first)
+          for (const list of lists)
+            for (const s of list) if (!byId.has(s.id)) byId.set(s.id, s);
+          allSessions = [...byId.values()].sort((a, b) =>
+            String(b.timestamp).localeCompare(String(a.timestamp)),
+          );
+          for (const s of allSessions) sessionLiveness.set(String(s.id), s);
+          fillCwdList();
+          renderSessions(select);
+        } catch {
+          banner.hidden = false;
+          banner.textContent = t("error.sessions");
+        }
+      }
+
+      // Fill the datalist. First list directories that actually exist on the server (query results), then the
+      // cwds of existing sessions (only those containing the typed text), without duplicates.
+      // Free input also works, so a path that exists in neither history nor the real suggestions can be specified as-is.
+      function fillCwdList(fsDirs = []) {
+        const dl = $("cwdList"),
+          seen = new Set();
+        dl.textContent = "";
+        const add = (v) => {
+          if (!v) return;
+          v = v.endsWith("/") ? v : v + "/"; // Unify to a trailing / (fs suggestions have /, session cwds don't)
+          if (seen.has(v)) return; // Dedupe after normalization (the same dir doesn't appear twice)
+          seen.add(v);
+          const o = document.createElement("option");
+          o.value = v;
+          dl.appendChild(o);
+        };
+        for (const d of fsDirs) add(d);
+        const f = trimSlash($("cwdBox").value.trim()).toLowerCase();
+        for (const s of allSessions) {
+          const c = (s.cwd || "").trim();
+          if (c && (!f || c.toLowerCase().includes(f))) add(c);
+        }
+      }
+
+      // Feed directories that actually exist on the server into the suggestions as the user types.
+      // Debounce to avoid hitting it too often, and don't let a stale response overwrite the result of a later request.
+      let dirTimer = null,
+        dirSeq = 0;
+      function scheduleDirSuggest() {
+        clearTimeout(dirTimer);
+        dirTimer = setTimeout(suggestDirs, 150);
+      }
+      async function suggestDirs() {
+        const val = $("cwdBox").value.trim();
+        const seq = ++dirSeq;
+        let dirs = [];
+        try {
+          const r = await api(`/api/fs/dirs?path=${encodeURIComponent(val)}`);
+          ({ dirs = [] } = await r.json());
+        } catch {
+          /* If it can't be fetched, show only the session-derived suggestions */
+        }
+        if (seq !== dirSeq) return; // If newer input arrived afterward, don't overwrite with the old result
+        fillCwdList(dirs);
+      }
+
+      // Filter the list by cwdBox input (substring match, case-insensitive). Does not refetch.
+      // Passing select opens that session. If it is already open, don't reconnect.
+      function renderSessions(select) {
+        const sel = $("sessions");
+        const filter = trimSlash($("cwdBox").value.trim()).toLowerCase();
+        const matching = filter
+          ? allSessions.filter((s) =>
+              (s.cwd || "").toLowerCase().includes(filter),
+            )
+          : allSessions;
+        const archivedCount = matching.filter((s) => s.archived).length;
+        if (!archivedCount) showArchived = false;
+        const shown = matching.filter((s) => showArchived || !s.archived);
+        paintArchiveControls(archivedCount);
+        sel.textContent = "";
+        const ph = document.createElement("option");
+        ph.value = "";
+        ph.textContent = !allSessions.length
+          ? t("session.none")
+          : shown.length
+            ? t("session.select")
+            : filter
+              ? t("session.noneForCwd")
+              : t("session.noneActive");
+        sel.appendChild(ph);
+        for (const s of shown) {
+          const o = document.createElement("option");
+          o.value = s.id;
+          // Show the cwd's lowest directory name (e.g. terminal-mode-console) to the right of the title.
+          // A native <option> can't dim just part of the text, so we make it look like secondary info via a separator and placement.
+          const dir = (s.cwd || "")
+            .replace(/[/\\]+$/, "")
+            .split(/[/\\]/)
+            .pop();
+          // Codex's UUIDv7-style IDs are time-derived on the leading side, making sessions with nearby
+          // timestamps hard to tell apart. For Codex only, use the last 8 chars as the short identifier; other providers use the first 8 chars as before.
+          const fullId = String(s.id || "");
+          const idShort =
+            PROVIDER === "codex" ? fullId.slice(-8) : fullId.slice(0, 8);
+          const title = (s.title || s.id).slice(0, 44);
+          const label = idShort ? `${idShort}  ${title}` : title;
+          const archivedLabel = s.archived ? `  ·  ${t("archive.badge")}` : "";
+          o.dataset.baseLabel =
+            (dir ? `${label}  ·  ${dir}` : label) + archivedLabel;
+          o.textContent = o.dataset.baseLabel;
+          o.dataset.cwd = s.cwd || "";
+          o.dataset.archived = s.archived ? "1" : "";
+          o.dataset.status = s.status || "idle";
+          sel.appendChild(o);
+        }
+        paintSessionLiveness();
+        // Open only when explicitly specified (e.g. right after creating a new one, or keeping the current one during filtering).
+        if (select && shown.some((s) => s.id === select)) {
+          sel.value = select;
+          cwd = sel.selectedOptions[0]?.dataset.cwd || null;
+          if (select !== sid) connect(select); // Don't reconnect on a redraw of the already-open list
+          return;
+        }
+        sel.value = "";
+        sid = null;
+        es?.close();
+        es = null;
+        log.textContent = "";
+        line(
+          "dim",
+          allSessions.length ? t("session.chooseHint") : t("session.newHint"),
+        );
+        setReady(false);
+        running(false);
+        paintArchiveAction();
+      }
+
+      function paintArchiveControls(count) {
+        const toggle = $("toggleArchived");
+        toggle.hidden = count === 0;
+        toggle.disabled = count === 0;
+        toggle.setAttribute("aria-pressed", showArchived ? "true" : "false");
+        toggle.textContent = `${showArchived ? "✓ " : ""}${t("archive.show", { count })}`;
+      }
+
+      function paintArchiveAction() {
+        const option = $("sessions").selectedOptions[0];
+        const archived = option?.dataset.archived === "1";
+        const s = option ? sessionLiveness.get(option.value) : null;
+        const state = s?.state ?? s?.status;
+        const blocked =
+          !option?.value ||
+          option.dataset.fresh === "1" ||
+          ["busy", "waiting", "background"].includes(state) ||
+          waiting;
+        const button = $("archiveSession");
+        button.textContent = archived
+          ? t("archive.restore")
+          : t("archive.action");
+        // Rather than lining up disabled buttons with reasons it can't be operated, show it in the info panel only when possible.
+        button.hidden = blocked;
+        button.disabled = blocked;
+        button.title = "";
+      }
+
+      async function toggleArchiveSession() {
+        const option = $("sessions").selectedOptions[0];
+        if (!option?.value) return;
+        const archived = option.dataset.archived === "1";
+        const entry = allSessions.find((s) => String(s.id) === option.value);
+        $("archiveSession").disabled = true;
+        $("archiveSession").hidden = true;
+        let r;
+        try {
+          r = await api("/api/sessions/archive", {
+            method: "POST",
+            body: JSON.stringify({
+              sessionId: option.value,
+              provider: PROVIDER,
+              archived: !archived,
+              snapshot: entry
+                ? {
+                    title: entry.title,
+                    cwd: entry.cwd,
+                    timestamp: entry.timestamp,
+                  }
+                : undefined,
+            }),
+          });
+        } catch {
+          line("err", t("archive.error"));
+          paintArchiveAction();
+          return;
+        }
+        if (!r.ok) {
+          const result = await r.json().catch(() => ({}));
+          line("err", result.error || t("archive.error"));
+          paintArchiveAction();
+          return;
+        }
+        if (entry) entry.archived = !archived;
+        renderSessions(
+          showArchived ? option.value : !archived ? null : option.value,
+        );
+      }
+
+      // Without refetching the list, update only the native option's relative display from the already-fetched epoch times.
+      // Keep it to a short single phrase so it doesn't widen the select.
+      function paintSessionLiveness() {
+        for (const o of $("sessions").options) {
+          const s = sessionLiveness.get(o.value);
+          if (!s || s.status !== "busy" || !Number.isFinite(s.lastActivityAt)) {
+            if (o.dataset.baseLabel) o.textContent = o.dataset.baseLabel;
+            continue;
+          }
+          const age = Math.max(0, Date.now() - s.lastActivityAt);
+          const threshold =
+            Number.isFinite(s.stallWarnMs) && s.stallWarnMs > 0
+              ? s.stallWarnMs
+              : 120000;
+          const live =
+            age >= threshold
+              ? t("session.noActivity", { time: durationText(age) })
+              : age >= 30000
+                ? t("session.quiet", { time: durationText(age) })
+                : t("session.activeAgo", { time: durationText(age) });
+          o.textContent = `${o.dataset.baseLabel}  ·  ${live}`;
+        }
+      }
+
+      function newSession() {
+        clearInterval(readOnlyTimer);
+        readOnlyTimer = null;
+        sessionReadOnly = false;
+        const sel = $("sessions");
+        const id = uuid();
+        const o = document.createElement("option");
+        o.value = id;
+        // Mark it so it's clear this is a new session that hasn't sent anything yet.
+        // The first send replaces it with the prompt text (see send() below).
+        o.textContent = t("session.unsent");
+        o.dataset.fresh = "1";
+        sel.appendChild(o);
+        sel.value = id;
+        setReady(true);
+        // Use the path in cwdBox as the new session's working directory (server default if empty).
+        cwd = $("cwdBox").value.trim() || null;
+        connect(id);
+        paintArchiveAction();
+      }
+
+      // ── File attachments ──────────────────────────────────────
+      // Images are turned into data URLs and put into images (the Vision backend inserts them into the user message).
+      // Text files are read and inlined into the body (text) at send time
+      //   —— no server-side changes. Unlike the read_file tool, this can send "files the browser holds".
+      let attachments = []; // Images: [{ name, dataUrl }]
+      let textFiles = []; // Text: [{ name, content }]
+
+      const MAX_TEXT_FILE = 256 * 1024; // Per-file limit (bytes)
+      // Decide whether to treat it as text. Either a text-family MIME or a match in the extension whitelist.
+      const TEXT_EXT =
+        /\.(txt|md|markdown|json|jsonl|csv|tsv|log|ya?ml|toml|ini|conf|xml|html?|css|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sh|bash|zsh|sql|env|diff|patch)$/i;
+      const isTextFile = (f) =>
+        f.type.startsWith("text/") ||
+        /json|xml|javascript|csv|yaml|x-sh|x-www-form/.test(f.type) ||
+        TEXT_EXT.test(f.name);
+
+      const readDataUrl = (file) =>
+        new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = reject;
+          fr.readAsDataURL(file);
+        });
+      const readText = (file) =>
+        new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = reject;
+          fr.readAsText(file);
+        });
+
+      function renderAttachments() {
+        const box = $("attach");
+        box.innerHTML = "";
+        box.hidden = attachments.length === 0 && textFiles.length === 0;
+        attachments.forEach((a, i) => {
+          const thumb = document.createElement("div");
+          thumb.className = "thumb";
+          const img = document.createElement("img");
+          img.src = a.dataUrl;
+          img.alt = a.name;
+          img.title = a.name;
+          const rm = document.createElement("button");
+          rm.textContent = "×";
+          rm.title = t("attachment.remove");
+          rm.onclick = () => {
+            attachments.splice(i, 1);
+            renderAttachments();
+          };
+          thumb.append(img, rm);
+          box.appendChild(thumb);
+        });
+        textFiles.forEach((f, i) => {
+          const chip = document.createElement("div");
+          chip.className = "file";
+          const nm = document.createElement("span");
+          nm.className = "nm";
+          nm.textContent = `📄 ${f.name}`;
+          nm.title = t("attachment.characters", {
+            name: f.name,
+            count: f.content.length,
+          });
+          const rm = document.createElement("button");
+          rm.textContent = "×";
+          rm.title = t("attachment.remove");
+          rm.onclick = () => {
+            textFiles.splice(i, 1);
+            renderAttachments();
+          };
+          chip.append(nm, rm);
+          box.appendChild(chip);
+        });
+      }
+
+      async function addFiles(files) {
+        for (const f of files) {
+          if (f.type.startsWith("image/")) {
+            try {
+              attachments.push({ name: f.name, dataUrl: await readDataUrl(f) });
+            } catch {
+              line("err", t("attachment.imageReadError", { name: f.name }));
+            }
+          } else if (isTextFile(f)) {
+            if (f.size > MAX_TEXT_FILE) {
+              line(
+                "err",
+                t("attachment.tooLarge", {
+                  name: f.name,
+                  size: f.size,
+                  max: MAX_TEXT_FILE,
+                }),
+              );
+              continue;
+            }
+            try {
+              textFiles.push({ name: f.name, content: await readText(f) });
+            } catch {
+              line("err", t("attachment.fileReadError", { name: f.name }));
+            }
+          } else {
+            line("dim", `> ${t("attachment.unsupported", { name: f.name })}`);
+          }
+        }
+        renderAttachments();
+      }
+
+      $("attachBtn").onclick = () => $("file").click();
+      $("file").onchange = (e) => {
+        addFiles(e.target.files);
+        e.target.value = "";
+      };
+      // Also support pasting images/files into the text field (Ctrl+V of a screenshot or attachment).
+      $("input").addEventListener("paste", (ev) => {
+        const files = [...(ev.clipboardData?.files || [])];
+        if (files.length) {
+          ev.preventDefault();
+          addFiles(files);
+        }
+      });
+      // Drag & drop onto the input field. Without preventDefault on dragover, drop won't fire and the browser
+      // will open the file instead. Highlight the border while dragging.
+      const inputEl = $("input");
+      ["dragenter", "dragover"].forEach((ev) =>
+        inputEl.addEventListener(ev, (e) => {
+          e.preventDefault();
+          inputEl.classList.add("drop");
+        }),
+      );
+      ["dragleave", "dragend", "drop"].forEach((ev) =>
+        inputEl.addEventListener(ev, (e) => {
+          e.preventDefault();
+          inputEl.classList.remove("drop");
+        }),
+      );
+      inputEl.addEventListener("drop", (e) => {
+        const files = [...(e.dataTransfer?.files || [])];
+        if (files.length) addFiles(files);
+      });
+
+      // ── Send ──────────────────────────────────────────────
+      async function send() {
+        const box = $("input");
+        const text = box.value.trim();
+        if ((!text && !attachments.length && !textFiles.length) || !sid) return;
+        box.value = "";
+        autoGrow(); // After clearing on send, return the height to minimum
+        setInfoCollapsed(true); // Collapse the info panel once the conversation starts
+        const images = attachments.map((a) => a.dataUrl);
+        const files = textFiles.slice();
+        attachments = [];
+        textFiles = [];
+        renderAttachments();
+
+        // Inline text files after the body (putting them first would fill the session title with the file
+        // content). Keep user input at the front for the title / list heading.
+        const parts = [];
+        if (text) parts.push(text);
+        for (const f of files)
+          parts.push(
+            `--- ${f.name} ---\n${f.content}\n--- end of ${f.name} ---`,
+          );
+        const outText = parts.join("\n\n");
+
+        // On the first send to a new session, replace the pulldown's heading with the sent content.
+        // This makes it clear from the list item too "which new session you're about to send to".
+        const opt = $("sessions").selectedOptions[0];
+        if (opt && opt.dataset.fresh) {
+          const label =
+            text ||
+            (files.length
+              ? t("attachment.fileCount", { count: files.length })
+              : t("attachment.imageCount", { count: images.length }));
+          opt.textContent = label.slice(0, 50);
+          delete opt.dataset.fresh;
+        }
+        const r = await api("/api/prompt", {
+          method: "POST",
+          body: JSON.stringify({
+            text: outText,
+            images: images.length ? images : undefined,
+            sessionId: sid,
+            cwd,
+            provider: PROVIDER,
+            model: selectedModel || undefined,
+          }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (body.queued > 0)
+          line("dim", `> ${t("queue.waiting", { count: body.queued })}`);
+      }
+
+      $("send").onclick = send;
+      $("stop").onclick = () =>
+        api("/api/interrupt", {
+          method: "POST",
+          body: JSON.stringify({ sessionId: sid }),
+        });
+      $("newSession").onclick = () => newSession();
+      $("archiveSession").onclick = toggleArchiveSession;
+      $("toggleArchived").onclick = () => {
+        showArchived = !showArchived;
+        try {
+          localStorage.setItem(LS_SHOW_ARCHIVED_KEY, showArchived ? "1" : "0");
+        } catch {}
+        renderSessions(sid);
+      };
+      $("sessions").onchange = async (e) => {
+        if (!e.target.value) return; // Ignore "— Select a session —"
+        const selected = e.target.selectedOptions[0];
+        cwd = selected?.dataset.cwd || null;
+        // Reflect the chosen session's cwd into the cwd field too (keep the current input if empty).
+        // Assigning .value doesn't fire oninput, so the list is not re-filtered.
+        if (cwd) $("cwdBox").value = cwd;
+        connect(e.target.value, false);
+        paintArchiveAction();
+        setInfoCollapsed(true); // Collapse when opening an existing session (= history)
+      };
+      $("inputOnly").onchange = (e) => {
+        log.hidden = e.target.checked;
+      };
+      $("toggleInfo").onclick = () => {
+        $("topInfo").hidden = !$("topInfo").hidden;
+      };
+      // cwd filtering. Keep the currently open session if it matches the condition; deselect it if it falls out.
+      // At the same time, dynamically show directories that actually exist and match the path being typed in the suggestions (datalist).
+      $("cwdBox").oninput = () => {
+        renderSessions(sid);
+        scheduleDirSuggest();
+      };
+      $("cwdBox").onfocus = scheduleDirSuggest; // Show suggestions from the moment of focus (under ~ if empty)
+      // When the path is committed (picking a suggestion, Enter, blur), refetch the list. If it's an absolute
+      // path, fetch scoped to that cwd and also pick up old sessions not in the overall recent list.
+      $("cwdBox").onchange = () => loadSessions(sid);
+
+      // The text field grows vertically to fit its content. Beyond max-height (40vh), CSS's overflow-y:auto
+      // takes over and it scrolls within the field. To make long-text entry easier.
+      function autoGrow() {
+        const el = $("input");
+        el.style.height = "auto";
+        el.style.height = el.scrollHeight + "px";
+      }
+      $("input").addEventListener("input", autoGrow);
+
+      // Prevent Enter during IME composition from being taken as send (essential for Japanese input).
+      // Only Ctrl+Enter commits. Conversion candidates appear on this browser side, so there's no need to send them to the glasses.
+      $("input").addEventListener("keydown", (ev) => {
+        if (
+          ev.key === "Enter" &&
+          (ev.ctrlKey || ev.metaKey) &&
+          !ev.isComposing
+        ) {
+          ev.preventDefault();
+          send();
+        }
+      });
+
+      // Update the model-selection pulldown. Options come from each backend's describe().models.
+      // currentModel is the last model specified in this conversation or provider scope (the remembered value).
+      // The display always follows currentModel. Since the user's selection is remembered on the server
+      // immediately via onchange, writing it back here never clears the selection (it always matches).
+      // This way, a model changed by another client such as the CLI or glasses also appears in the pulldown.
+      function updateModelPicker(models, currentModel, autoModel) {
+        const sel = $("modelSelect");
+        if (!sel) return;
+        const list = Array.isArray(models) ? models : [];
+        if (!list.length) {
+          sel.hidden = true;
+          return;
+        } // Hide if the list isn't fetched / selection isn't supported
+        if (sel.dataset.pop !== "1") {
+          sel.innerHTML = "";
+          const ph = document.createElement("option");
+          ph.value = "";
+          ph.textContent = t("model.auto"); // Empty = defer to the server's memory/default
+          sel.appendChild(ph);
+          for (const m of list) {
+            const o = document.createElement("option");
+            // label is language-independent (Opus etc.). For the note, translate noteKey here and put it in parentheses.
+            o.value = m.value;
+            o.textContent = m.noteKey
+              ? `${m.label} (${t(m.noteKey)})`
+              : m.label;
+            sel.appendChild(o);
+          }
+          sel.dataset.pop = "1";
+        }
+        // Show which model "auto" would actually send, so an unchosen state isn't a mystery
+        // (the local LLM has to name a model — there is no "let the server decide").
+        // Refreshed every time, since which model gets picked changes as models are loaded.
+        const ph = sel.options[0];
+        if (ph && ph.value === "") {
+          ph.textContent = autoModel
+            ? `${t("model.auto")} (${autoModel})`
+            : t("model.auto");
+        }
+        sel.hidden = false;
+        // Reflect the remembered value into the "display". Display-only; it does not count as a selection
+        // (don't touch selectedModel). Putting it on the send when the user hasn't chosen it would be treated
+        // as an explicit specification in a scenario that should merely carry over, causing an unintended model switch.
+        // Don't touch it while being operated (focused) — a moving open dropdown list is hard to choose from.
+        if (document.activeElement === sel) return;
+        const cur = currentModel || "";
+        const next = [...sel.options].some((o) => o.value === cur) ? cur : "";
+        if (sel.value !== next) sel.value = next;
+      }
+
+      // Pulldown change: only here does it count as "the user explicitly chose". Without waiting for a send,
+      // remember it on the server and carry it over to the next turn of the UI-less glasses too.
+      // When "auto" is chosen, clear the memory and return to deferring to the session/server-side settings.
+      $("modelSelect").onchange = async (e) => {
+        selectedModel = e.target.value || "";
+        if (!sid) return;
+        try {
+          await api("/api/model", {
+            method: "POST",
+            // model:"" clears the memory. The server treats this as a clear request.
+            body: JSON.stringify({
+              sessionId: sid,
+              provider: PROVIDER,
+              model: selectedModel,
+            }),
+          });
+        } catch {}
+      };
+
+      async function showBackend() {
+        try {
+          const q =
+            `/api/info?provider=${encodeURIComponent(PROVIDER)}` +
+            (sid ? `&sessionId=${encodeURIComponent(sid)}` : "");
+          const r = await api(q);
+          const i = await r.json();
+          const b = i.backend || {};
+          const backendLabel = b.label || i.provider;
+          const model = b.model || "";
+          const endpoint = b.endpoint || "";
+          const where = endpoint && endpoint !== "-" ? ` @ ${endpoint}` : "";
+          // When the backend is known to be unreachable, say so plainly. In that state
+          // neither the label nor the model came from the backend — they are a local guess
+          // and a default — so the normal styling would make a broken setup look working.
+          const unreachable = b.reachable === false;
+          $("backend").classList.toggle("err", unreachable);
+          $("backend").textContent = unreachable
+            ? `${t("backend.unreachable")}${where}`
+            : `${backendLabel} / ${model}${where}`;
+          $("backend").title = unreachable
+            ? t("backend.unreachableHint")
+            : t("backend.requested", {
+                provider: i.provider,
+                requested: PROVIDER,
+              });
+          updateModelPicker(b.models, i.currentModel, b.autoModel);
+          // Notify if the glasses hasn't come back to reconnect (common after a server restart)
+          if (i.app?.glassesStale) {
+            banner.hidden = false;
+            banner.textContent = t("warning.glassesDisconnected");
+          } else if (banner.textContent === t("warning.glassesDisconnected")) {
+            banner.hidden = true;
+          }
+        } catch {
+          $("backend").textContent = "";
+        }
+      }
+      setInterval(showBackend, 15000); // Continuously monitor connection status
+      setInterval(paintSessionLiveness, 1000); // Advance only the relative times without refetching the list
+
+      localeReady.then(() => {
+        applyTranslations();
+        paintState();
+        if (!TOKEN) {
+          banner.hidden = false;
+          banner.textContent = t("error.missingToken");
+        } else {
+          showBackend();
+          loadSessions();
+        }
+      });
+
+      // When Safari etc. restores a tab from the page cache, only the horizontal scroll position can come back
+      // with an old viewport value, appearing to overflow by a few px until reload.
+      // pageshow fires on both normal display and page-cache restore, so reset only x after rendering.
+      window.addEventListener("pageshow", () => {
+        requestAnimationFrame(() => window.scrollTo(0, window.scrollY));
+      });
+    </script>
+  </body>
+</html>

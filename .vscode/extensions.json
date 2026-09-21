@@ -1,0 +1,16 @@
+{
+  // List of recommended VSCode extensions. Opening the workspace suggests installing them.
+  "recommendations": [
+    // --- Top priority: for the main JS (.mjs) ---
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+
+    // --- Supplementary: per file type ---
+    "DavidAnson.vscode-markdownlint",
+    "streetsidesoftware.code-spell-checker",
+    "redhat.vscode-yaml",
+    "stylelint.vscode-stylelint",
+    "HTMLHint.vscode-htmlhint"
+  ],
+  "unwantedRecommendations": []
+}

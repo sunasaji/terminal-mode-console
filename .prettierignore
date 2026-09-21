@@ -1,0 +1,4 @@
+node_modules/
+web/vendor/
+package-lock.json
+*.log

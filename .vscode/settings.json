@@ -1,0 +1,33 @@
+{
+  // ESLint: use the flat config
+  "eslint.useFlatConfig": true,
+  "eslint.validate": ["javascript"],
+  "eslint.probe": ["javascript"],
+
+  // Make Prettier the default formatter and format on save
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+
+  // Bundled minified libraries etc. are excluded from analysis and formatting
+  "eslint.workingDirectories": [{ "mode": "auto" }],
+  "files.exclude": {},
+  "search.exclude": {
+    "node_modules": true,
+    "web/vendor": true,
+    "package-lock.json": true,
+    "**/*.log": true
+  },
+  "prettier.ignorePath": ".prettierignore",
+
+  // Code Spell Checker: a mixed English/Japanese project
+  "cSpell.language": "en",
+
+  // markdownlint: a light relaxation example to tolerate a huge README
+  "markdownlint.config": {
+    "MD013": false, // disable the line-length limit
+    "MD033": false // allow inline HTML (images in docs etc.)
+  }
+}

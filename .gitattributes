@@ -1,0 +1,13 @@
+# Normalize line endings: check out and commit with LF regardless of platform.
+* text=auto eol=lf
+
+# Treat vendored/minified web assets and images as binary (no diff/merge, no EOL munging).
+web/vendor/** binary
+*.min.js binary
+*.min.css binary
+*.png binary
+*.svg -text
+
+# Collapse noisy generated files in diffs and language stats.
+package-lock.json linguist-generated=true -diff
+web/vendor/** linguist-vendored=true
