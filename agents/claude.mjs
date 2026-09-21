@@ -93,6 +93,16 @@ const MODEL_CHOICES = [
 ];
 const PERMISSION_MODE = process.env.CLAUDE_PERMISSION_MODE || "acceptEdits";
 const DEBUG = process.env.CLAUDE_DEBUG === "1";
+// Turn-lifecycle diagnostics. Emits a compact trace of result classification
+// (foreground vs background via origin), background_tasks_changed transitions,
+// ambient-state changes, and pendingFg resolution. Use it to confirm the
+// "stuck on 実行中… / no response" case (a foreground result that never resolves
+// runTurn, so the bus never returns to idle). Enable with CLAUDE_DEBUG=1.
+const dbgTurn = (session, ...a) =>
+  DEBUG &&
+  process.stderr.write(
+    `[claude ${session.id.slice(0, 8)} turn] ${a.join(" ")}\n`,
+  );
 // Auto compaction is off by default. Enable it with CLAUDE_AUTO_COMPACT=1/true/on.
 // The value is injected into the query's settings (the flag settings layer =
 // higher priority than user/project settings.json), so this default reliably
@@ -353,10 +363,17 @@ export async function runReader(conn) {
   // message arrives, re-assert and bring the WebUI's bottom line back to
   // background.
   const setAmbient = () => {
-    if (conn.pendingFg.length) return; // during a foreground turn, leave it to the normal flow
+    if (conn.pendingFg.length) {
+      dbgTurn(
+        session,
+        `setAmbient: skip (foreground pending=${conn.pendingFg.length})`,
+      );
+      return; // during a foreground turn, leave it to the normal flow
+    }
     if (conn.bgCount > 0) {
       // background overrides the idle the bus emits out-of-band, so re-emit it every time (do not suppress).
       conn.ambientState = "background";
+      dbgTurn(session, `setAmbient: background (bgCount=${conn.bgCount})`);
       emit({
         type: "status",
         state: "background",
@@ -366,6 +383,7 @@ export async function runReader(conn) {
     } else {
       if (conn.ambientState === "idle") return; // suppress consecutive idles (prevents duplicates right after completion)
       conn.ambientState = "idle";
+      dbgTurn(session, "setAmbient: idle");
       emit({ type: "status", state: "idle", sessionId: session.id }); // all done → back to Waiting input
     }
   };
@@ -379,6 +397,7 @@ export async function runReader(conn) {
             const tasks = Array.isArray(msg.tasks) ? msg.tasks : [];
             const prev = conn.bgCount;
             conn.bgCount = tasks.length;
+            dbgTurn(session, `bg_tasks_changed ${prev}->${conn.bgCount}`);
             if (prev === 0 && tasks.length > 0) {
               const desc = tasks
                 .map((task) => task.description)
@@ -400,6 +419,10 @@ export async function runReader(conn) {
               // connection so the next turn recycles the query (close + reopen
               // with resume, preserving context) instead of reusing this one.
               conn.staleAfterBg = true;
+              dbgTurn(
+                session,
+                "staleAfterBg=true (recycle query before next turn)",
+              );
             }
           }
           // Every time a background-originated system message (task_progress /
@@ -464,6 +487,13 @@ export async function runReader(conn) {
           }
           break;
         case "result": {
+          dbgTurn(
+            session,
+            `result subtype=${msg.subtype}`,
+            `origin=${msg.origin ? (msg.origin.kind ?? "yes") : "none"}`,
+            `pendingFg=${conn.pendingFg.length}`,
+            `bgCount=${conn.bgCount}`,
+          );
           // Captured before the reset below: whether this turn's body was streamed
           // to the WebUI as text_delta. A background sub-turn is NOT always streamed
           // (see the origin branch), so this decides whether we still need to render it.
@@ -492,6 +522,10 @@ export async function runReader(conn) {
           // background_tasks_changed→[] side; other agents may still be running, so
           // this is an "update", not "complete".
           if (msg.origin) {
+            dbgTurn(
+              session,
+              `result: origin present → NOT resolving foreground (pendingFg=${conn.pendingFg.length} stays; bus will NOT go idle if this was actually the foreground turn)`,
+            );
             if (!wasStreaming && answer) {
               status("text_start");
               emit({ type: "text_delta", text: answer });
@@ -523,6 +557,10 @@ export async function runReader(conn) {
               inputTokens: 0,
               outputTokens: 0,
             });
+            dbgTurn(
+              session,
+              `result: foreground → resolving runTurn (pendingFg ${conn.pendingFg.length}->${Math.max(0, conn.pendingFg.length - 1)})`,
+            );
             conn.pendingFg.shift()?.(answer); // return the corresponding runTurn
             // After a foreground turn, instead of emitting idle the bus queries
             // backgroundStatus(), so if a background remains, we can keep
@@ -554,6 +592,11 @@ export async function runReader(conn) {
       /* swallow */
     }
     // Release any waiting runTurn and bring the bus back to idle (don't leave it frozen with no response).
+    if (conn.pendingFg.length)
+      dbgTurn(
+        session,
+        `reader end: releasing ${conn.pendingFg.length} pending foreground turn(s) as CANCELLED`,
+      );
     while (conn.pendingFg.length) conn.pendingFg.shift()?.(CANCELLED);
   }
 }
@@ -578,6 +621,7 @@ async function getConn(session, model) {
       existing.bgCount === 0 &&
       existing.pendingFg.length === 0
     ) {
+      dbgTurn(session, "getConn: recycling stale-after-background query");
       existing.closed = true;
       if (conns.get(session.id) === existing) conns.delete(session.id);
       try {
@@ -859,8 +903,16 @@ export default {
       }
     }
     const done = new Promise((resolve) => conn.pendingFg.push(resolve));
+    dbgTurn(
+      session,
+      `runTurn: enqueued user message (pendingFg=${conn.pendingFg.length}, bgCount=${conn.bgCount}) — awaiting foreground result`,
+    );
     conn.input.push(buildUserMessage(text, images));
     await done; // resolved by a foreground result (also resolved via CANCELLED on disconnect/interrupt)
+    dbgTurn(
+      session,
+      "runTurn: returned (bus will now re-evaluate ambient state)",
+    );
   },
 
   /** Interrupt. Called from bus.interrupt. Tears down the persistent query and
