@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Tracked upstream `@evenrealities/even-terminal` up to v0.10.4 (protocol notes
+  were based on v0.8.1) and aligned the HTTP API responses for compatibility
+  with newer clients:
+  - `401` responses now use the structured envelope
+    `{"error":{"code":"auth_failed","message":"Unauthorized"}}` instead of the
+    bare `{"error":"Unauthorized"}` string.
+  - `/api/info` now includes `extra.expose` (`off` by default; honours the same
+    `EVEN_TERMINAL_EXPOSE_PROVIDER` / `EVEN_HOST_MODE` env vars as upstream), and
+    answers a failed build with `500 {"error":{"code":"info_failed","message"}}`.
+  - `/api/permission-response` now rejects a decision that was never offered:
+    unknown session → `404 {"error":"Session not found"}`, session with no
+    pending request → `400 {"error":"…not offered or no permission request is
+pending"}` (previously always acknowledged with `200`).
+  - Documented that the experimental `claude-sync` provider name is accepted
+    (it resolves to the `claude` slot; its internal CLI-wrapping transport is
+    not reimplemented). Updated `docs/protocol.md` / `docs/protocol.ja.md`.
+
 ## [0.3.0] - 2026-09-22
 
 ### Fixed

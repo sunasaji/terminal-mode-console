@@ -84,6 +84,20 @@ function appHealth() {
     sseClients: s,
   };
 }
+// The `extra.expose` value reported by /api/info. Mirrors upstream
+// even-terminal 0.10.x, which advertises how the server is exposed to the
+// network (a tunnel provider, tailscale, or "off"). terminal-mode-console has
+// no built-in tunnel, but it honours the same environment variables so a client
+// that reads this field sees the same vocabulary. Defaults to "off".
+function getExposeType() {
+  const expose = process.env.EVEN_TERMINAL_EXPOSE_PROVIDER;
+  if (expose === "pinggy" || expose === "bore" || expose === "ngrok")
+    return expose;
+  if (expose) return "other";
+  if (process.env.EVEN_HOST_MODE === "tailscale") return "tailscale";
+  return process.env.EVEN_HOST_MODE ? "other" : "off";
+}
+
 // Log each state transition once (not on every poll)
 let staleLogged = false;
 setInterval(() => {
@@ -311,7 +325,12 @@ const server = createServer(async (req, res) => {
   const provided = header?.startsWith("Bearer ")
     ? header.slice(7)
     : url.searchParams.get("token");
-  if (provided !== TOKEN) return json(res, 401, { error: "Unauthorized" });
+  // Match upstream even-terminal 0.10.x, which returns a structured error
+  // envelope (`{error:{code,message}}`) rather than a bare `{error:"…"}` string.
+  if (provided !== TOKEN)
+    return json(res, 401, {
+      error: { code: "auth_failed", message: "Unauthorized" },
+    });
 
   let body = {};
   if (req.method === "POST") {
@@ -419,36 +438,50 @@ const server = createServer(async (req, res) => {
 
   // ── REST ──────────────────────────────────────────────
   if (p === "/api/info") {
-    // Actually resolve the requested provider before answering. Even if a
-    // fallback has occurred, looking here reveals "where it is really connected".
-    const requestedProvider = url.searchParams.get("provider");
-    const agent = getAgent(requestedProvider);
-    const d = agent.describe?.() ?? {};
-    // Initial value for the model-selection dropdown. If a sessionId is present,
-    // return that conversation's remembered model; otherwise return the provider
-    // slot's global default (the value some other client last chose). This lets
-    // the WebUI display reflect the same model as the UI-less glasses.
-    const providerSlot = providerKey(requestedProvider);
-    const sessionId = url.searchParams.get("sessionId");
-    let currentModel;
     try {
-      currentModel = await rememberedModel(providerSlot, sessionId || "");
-    } catch {
-      currentModel = null;
+      // Actually resolve the requested provider before answering. Even if a
+      // fallback has occurred, looking here reveals "where it is really connected".
+      const requestedProvider = url.searchParams.get("provider");
+      const agent = getAgent(requestedProvider);
+      const d = agent.describe?.() ?? {};
+      // Initial value for the model-selection dropdown. If a sessionId is present,
+      // return that conversation's remembered model; otherwise return the provider
+      // slot's global default (the value some other client last chose). This lets
+      // the WebUI display reflect the same model as the UI-less glasses.
+      const providerSlot = providerKey(requestedProvider);
+      const sessionId = url.searchParams.get("sessionId");
+      let currentModel;
+      try {
+        currentModel = await rememberedModel(providerSlot, sessionId || "");
+      } catch {
+        currentModel = null;
+      }
+      return json(res, 200, {
+        account: {
+          email: "local",
+          organization: "local",
+          subscriptionType: "local",
+        },
+        model: d.model ?? agent.name,
+        currentModel: currentModel ?? null, // the remembered effective model (extension field)
+        version: "0.3.0",
+        provider: agent.name,
+        backend: { provider: agent.name, ...d }, // extension field (includes the models list)
+        app: appHealth(), // the glasses' connection state (extension field)
+        // upstream even-terminal 0.10.x: how the server is exposed ("off" here,
+        // as terminal-mode-console has no built-in tunnel). See getExposeType().
+        extra: { expose: getExposeType() },
+      });
+    } catch (err) {
+      // Match upstream even-terminal 0.10.x: a failed /info answers with HTTP
+      // 500 and a structured error, rather than a 200 fallback object.
+      return json(res, 500, {
+        error: {
+          code: "info_failed",
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
     }
-    return json(res, 200, {
-      account: {
-        email: "local",
-        organization: "local",
-        subscriptionType: "local",
-      },
-      model: d.model ?? agent.name,
-      currentModel: currentModel ?? null, // the remembered effective model (extension field)
-      version: "0.3.0",
-      provider: agent.name,
-      backend: { provider: agent.name, ...d }, // extension field (includes the models list)
-      app: appHealth(), // the glasses' connection state (extension field)
-    });
   }
 
   // A dedicated endpoint for cheaply checking just the connection state (for monitoring / the WebUI)
@@ -811,7 +844,17 @@ const server = createServer(async (req, res) => {
   if (p === "/api/permission-response" && req.method === "POST") {
     if (!body.sessionId)
       return json(res, 400, { error: "Missing 'sessionId'" });
-    bus.resolvePermission(body.sessionId, body.decision);
+    // Mirror upstream even-terminal 0.10.x: reject a decision that was never
+    // offered (unknown session → 404, no pending request → 400) instead of
+    // silently acknowledging it.
+    const status = bus.resolvePermission(body.sessionId, body.decision);
+    if (status === "no_session")
+      return json(res, 404, { error: "Session not found" });
+    if (status === "no_pending")
+      return json(res, 400, {
+        error:
+          "Permission decision was not offered or no permission request is pending",
+      });
     return json(res, 200, { ok: true });
   }
   if (p === "/api/question-response" && req.method === "POST") {
