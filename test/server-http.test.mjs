@@ -88,17 +88,45 @@ test("static WebUI shell is served without a token", async () => {
 });
 
 test("auth: API rejects missing and wrong tokens", async () => {
-  assert.equal((await api("/api/info")).status, 401);
+  const missing = await api("/api/info");
+  assert.equal(missing.status, 401);
+  // Structured error envelope, matching upstream even-terminal 0.10.x.
+  assert.deepEqual(await missing.json(), {
+    error: { code: "auth_failed", message: "Unauthorized" },
+  });
   assert.equal((await api("/api/info", { token: "nope" })).status, 401);
 });
 
 test("auth: API accepts the token via Bearer header and ?token= query", async () => {
   const bearer = await api("/api/info", { token: TOKEN });
   assert.equal(bearer.status, 200);
-  assert.ok((await bearer.json()).provider);
+  const info = await bearer.json();
+  assert.ok(info.provider);
+  // `extra.expose` is advertised for upstream even-terminal 0.10.x parity, and
+  // is "off" here since terminal-mode-console has no built-in tunnel.
+  assert.equal(info.extra.expose, "off");
 
   const query = await fetch(`${base}/api/info?token=${TOKEN}`);
   assert.equal(query.status, 200);
+});
+
+test("/api/permission-response rejects a decision that was never offered", async () => {
+  // Missing sessionId is a plain 400.
+  const noId = await api("/api/permission-response", {
+    method: "POST",
+    token: TOKEN,
+    body: { decision: "allow" },
+  });
+  assert.equal(noId.status, 400);
+
+  // Unknown session → 404, matching upstream even-terminal 0.10.x.
+  const unknown = await api("/api/permission-response", {
+    method: "POST",
+    token: TOKEN,
+    body: { sessionId: "no-such-session", decision: "allow" },
+  });
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(await unknown.json(), { error: "Session not found" });
 });
 
 test("/api/fs/dirs is unreachable without the token", async () => {

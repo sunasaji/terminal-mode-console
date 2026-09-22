@@ -427,8 +427,17 @@ export function makeAsk(sessionId) {
   };
 }
 
+// Returns a status so the HTTP layer can mirror upstream even-terminal 0.10.x:
+//   "no_session" → the session does not exist (404)
+//   "no_pending" → the session exists but no permission request is awaiting (400)
+//   "ok"         → a pending request was resolved with the decision
 export function resolvePermission(sessionId, decision) {
-  sessions.get(sessionId)?.pending.permissions.shift()?.(decision || "deny");
+  const s = sessions.get(sessionId);
+  if (!s) return "no_session";
+  const resolver = s.pending.permissions.shift();
+  if (!resolver) return "no_pending";
+  resolver(decision || "deny");
+  return "ok";
 }
 export function resolveQuestion(sessionId, answer) {
   sessions.get(sessionId)?.pending.questions.shift()?.(answer || "skip");
