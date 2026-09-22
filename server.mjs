@@ -464,7 +464,7 @@ const server = createServer(async (req, res) => {
         },
         model: d.model ?? agent.name,
         currentModel: currentModel ?? null, // the remembered effective model (extension field)
-        version: "0.3.0",
+        version: "0.3.1",
         provider: agent.name,
         backend: { provider: agent.name, ...d }, // extension field (includes the models list)
         app: appHealth(), // the glasses' connection state (extension field)

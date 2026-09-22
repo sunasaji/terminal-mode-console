@@ -1,6 +1,6 @@
 {
   "name": "terminal-mode-console",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Independent server that speaks the same HTTP API as the Even Realities G2 Terminal Mode app. A multi-device console for driving one shared session from PC, phone, glasses, and CLI. Works with Claude / Codex / local LLMs (LM Studio/Ollama/llama.cpp). Zero core dependencies. Not affiliated with Even Realities.",
   "type": "module",
   "keywords": [
