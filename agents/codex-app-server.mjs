@@ -58,7 +58,7 @@ export class CodexAppServer extends EventEmitter {
       clientInfo: {
         name: "terminal-mode-console",
         title: "terminal-mode-console",
-        version: "0.3.0",
+        version: "0.3.1",
       },
       capabilities: { experimentalApi: true },
     });
