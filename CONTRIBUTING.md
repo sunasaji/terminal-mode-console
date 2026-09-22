@@ -38,6 +38,9 @@ individual commits, their messages, and authorship are preserved. Please keep
 each pull request focused on a single topic, and tidy obvious noise (e.g.
 "wip" / "typo" commits) before submitting.
 
+Maintainers: see [docs/maintaining.md](docs/maintaining.md) for the branch model
+and release workflow.
+
 ## Guidelines
 
 - **Language.** Code and comments are written in English. User-facing strings
