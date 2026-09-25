@@ -17,6 +17,19 @@ const STALL_WARN_MS = Math.max(
 );
 const MAX_MESSAGES = 500; // SSE ring buffer length (value matched to the official implementation)
 
+// Turn-lifecycle diagnostics (backend-agnostic). Traces when a turn starts,
+// when runTurn returns, and whether drain emits idle or a background status at
+// the end. Pairs with the claude adapter's dbgTurn to pinpoint the "stuck on
+// 実行中… / no response" case. Enable with CLAUDE_DEBUG=1 (or TMCON_DEBUG=1).
+const DEBUG = /^(1|true|on|yes)$/i.test(
+  process.env.TMCON_DEBUG ?? process.env.CLAUDE_DEBUG ?? "",
+);
+const dbgTurn = (sessionId, ...a) =>
+  DEBUG &&
+  process.stderr.write(
+    `[bus ${String(sessionId).slice(0, 8)} turn] ${a.join(" ")}\n`,
+  );
+
 /**
  * session = {
  *   id, title, cwd, provider,
@@ -228,6 +241,7 @@ async function drain(sessionId) {
     s.abort = new AbortController();
     emit(sessionId, { type: "user_prompt", text });
     emit(sessionId, { type: "status", state: "busy", sessionId });
+    dbgTurn(sessionId, `drain: turn start (queue remaining=${s.queue.length})`);
 
     // Silence watcher. Stays quiet as long as events are flowing. If nothing flows for
     // STALL_WARN_MS, it tells the user in dim text that it's "still working / can be interrupted" (without killing the turn).
@@ -287,6 +301,10 @@ async function drain(sessionId) {
     } finally {
       if (watcher) clearInterval(watcher);
     }
+    dbgTurn(
+      sessionId,
+      `drain: runTurn returned after ${Date.now() - turnStartedAt}ms (queue remaining=${s.queue.length})`,
+    );
   }
   s.running = false;
   s.state = "idle";
@@ -298,6 +316,10 @@ async function drain(sessionId) {
   // once the foreground turn ends makes it indistinguishable from actually running. Ask the adapter for its current
   // base state, and if there is one, emit that (e.g. status:background) instead of idle.
   const bg = s.agent?.backgroundStatus?.(s);
+  dbgTurn(
+    sessionId,
+    `drain: queue drained → emitting ${bg ? `background(count=${bg.count})` : "idle"}`,
+  );
   emit(sessionId, bg || { type: "status", state: "idle", sessionId });
 }
 
