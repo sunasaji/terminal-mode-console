@@ -53,6 +53,13 @@
 //                           handoff prompt and moving to a new thread, so they are
 //                           not auto-compacted.
 //   CLAUDE_DEBUG=1          write the SDK/CLI stderr to the server log (for diagnostics)
+//   CLAUDE_BG_AUTO_CONTINUE default on. After background (Task sub-agent) work
+//                           finishes, auto-enqueue a continuation turn so the main
+//                           agent reviews the results and gives its final answer
+//                           (this SDK setup emits no task-notification follow-up on
+//                           its own). Set 0/false/off to disable.
+//   CLAUDE_BG_AUTO_CONTINUE_MAX  cap on chained auto-continuations (default 5;
+//                           reset by any user turn) to avoid runaway loops
 
 import { existsSync, mkdirSync } from "node:fs";
 import { makeT } from "../i18n.mjs";
@@ -103,6 +110,20 @@ const dbgTurn = (session, ...a) =>
   process.stderr.write(
     `[claude ${session.id.slice(0, 8)} turn] ${a.join(" ")}\n`,
   );
+// After a background (Task sub-agent) cycle finishes, this SDK/streaming setup
+// does not emit a task-notification follow-up, so the main agent never reviews
+// the results on its own — the turn just ends at idle (confirmed via the
+// turn-lifecycle trace). Auto-enqueue a continuation turn so it produces the
+// final answer it promised. On by default; set CLAUDE_BG_AUTO_CONTINUE=0 to
+// disable. MAX_BG_FOLLOWUP caps chained continuations (reset by any user turn) so
+// a model that keeps relaunching background work can't loop indefinitely.
+const AUTO_CONTINUE = !/^(0|false|off|no)$/i.test(
+  process.env.CLAUDE_BG_AUTO_CONTINUE ?? "",
+);
+const MAX_BG_FOLLOWUP = Math.max(
+  0,
+  parseInt(process.env.CLAUDE_BG_AUTO_CONTINUE_MAX ?? "5", 10) || 0,
+);
 // Auto compaction is off by default. Enable it with CLAUDE_AUTO_COMPACT=1/true/on.
 // The value is injected into the query's settings (the flag settings layer =
 // higher priority than user/project settings.json), so this default reliably
@@ -423,6 +444,22 @@ export async function runReader(conn) {
                 session,
                 "staleAfterBg=true (recycle query before next turn)",
               );
+              // Auto-continue: enqueue a hidden turn so the main agent reviews the
+              // completed background results and gives its final answer. Skip while
+              // a foreground turn is active (the user is interacting and the results
+              // are already in context for their next turn); cap chained follow-ups.
+              if (
+                AUTO_CONTINUE &&
+                conn.pendingFg.length === 0 &&
+                (session.bgFollowupChain ?? 0) < MAX_BG_FOLLOWUP &&
+                typeof conn.enqueueFollowup === "function"
+              ) {
+                dbgTurn(
+                  session,
+                  `bg complete → enqueue auto-continuation (chain=${session.bgFollowupChain ?? 0})`,
+                );
+                conn.enqueueFollowup(t("prompt.bg.followup"));
+              }
             }
           }
           // Every time a background-originated system message (task_progress /
@@ -865,7 +902,16 @@ export default {
     return out.slice(-limit);
   },
 
-  async runTurn({ session, text, images, model, emit, ask }) {
+  async runTurn({
+    session,
+    text,
+    images,
+    model,
+    emit,
+    ask,
+    enqueueFollowup,
+    followup,
+  }) {
     // Prepare the session's persistent query (if none, resolve resume/cwd and
     // open it), and push this turn's user message into the input channel. The
     // reader streams the response to the SSE, and once this turn's foreground
@@ -881,6 +927,10 @@ export default {
     const conn = await getConn(session, effectiveModel); // cold-open applies the initial model here
     conn.emit = emit; // use the latest turn's trackedEmit (tied to the bus's silence watcher)
     conn.ask = ask; // route the permission/question round-trip to the latest turn's too
+    conn.enqueueFollowup = enqueueFollowup; // so the reader can auto-continue after background work
+    // Track chained auto-continuations on the session (survives query recycles).
+    // A real user turn resets it; a followup turn increments it (see MAX_BG_FOLLOWUP).
+    session.bgFollowupChain = followup ? (session.bgFollowupChain ?? 0) + 1 : 0;
     // Swap the existing query's model only when the specification changed.
     // setModel is an API specific to streaming-input that switches the model for
     // subsequent responses without re-opening the query.

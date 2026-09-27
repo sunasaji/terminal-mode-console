@@ -96,6 +96,55 @@ test("a streamed background sub-turn is not re-rendered (no double body)", async
   assert.ok(note, "the streamed body is summarized in the update notification");
 });
 
+const bgChanged = (tasks) => ({
+  type: "system",
+  subtype: "background_tasks_changed",
+  tasks,
+});
+
+test("auto-continuation: enqueues a follow-up turn when background work finishes", async () => {
+  const calls = [];
+  const { conn } = fakeConn([
+    bgChanged([{ description: "watch CI" }]), // 0 -> 1
+    bgChanged([]), // 1 -> 0 : all background done
+  ]);
+  conn.pendingFg = []; // the foreground turn already resolved
+  conn.enqueueFollowup = (text) => calls.push(text);
+  await runReader(conn);
+
+  assert.equal(calls.length, 1, "exactly one continuation turn is enqueued");
+  assert.match(calls[0], /background|finished|results|結果/i);
+});
+
+test("auto-continuation: does not fire while a foreground turn is still active", async () => {
+  const calls = [];
+  const { conn } = fakeConn([bgChanged([{}]), bgChanged([])]);
+  conn.pendingFg = [() => {}]; // a foreground turn is in flight
+  conn.enqueueFollowup = (text) => calls.push(text);
+  await runReader(conn);
+
+  assert.equal(
+    calls.length,
+    0,
+    "no auto-continuation while the user's turn runs",
+  );
+});
+
+test("auto-continuation: honors the chained-followup cap", async () => {
+  const calls = [];
+  const { conn } = fakeConn([bgChanged([{}]), bgChanged([])]);
+  conn.pendingFg = [];
+  conn.session.bgFollowupChain = 99; // already past the cap
+  conn.enqueueFollowup = (text) => calls.push(text);
+  await runReader(conn);
+
+  assert.equal(
+    calls.length,
+    0,
+    "the cap stops runaway auto-continuation loops",
+  );
+});
+
 test("a foreground result (no origin) still emits a turn-ending result", async () => {
   const { conn, events } = fakeConn([
     streamDelta("foreground answer"),

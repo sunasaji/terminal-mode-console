@@ -210,7 +210,8 @@ async function drain(sessionId) {
   if (s.running) return;
   s.running = true;
   while (s.queue.length) {
-    const { text, images, agent, model, stallWarnMs } = s.queue.shift();
+    const job = s.queue.shift();
+    const { text, images, agent, model, stallWarnMs } = job;
 
     // On the session's first turn, announce the actually-connected backend exactly once.
     // provider can fall back, so even if the app selected "Claude Code", the real
@@ -239,7 +240,17 @@ async function drain(sessionId) {
     s.activityKind = "turn_start";
     s.agent = agent; // so that interrupt reaches the adapter
     s.abort = new AbortController();
-    emit(sessionId, { type: "user_prompt", text });
+    // A followup turn is an auto-continuation injected by the adapter (e.g. after
+    // background work finished), not something the user typed — show it as a dim
+    // marker instead of echoing a user prompt line.
+    if (job.followup)
+      emit(sessionId, {
+        type: "notification",
+        key: "bg.continue",
+        title: t("notify.bg.continueTitle"),
+        message: t("notify.bg.continueMessage"),
+      });
+    else emit(sessionId, { type: "user_prompt", text });
     emit(sessionId, { type: "status", state: "busy", sessionId });
     dbgTurn(sessionId, `drain: turn start (queue remaining=${s.queue.length})`);
 
@@ -282,6 +293,11 @@ async function drain(sessionId) {
           )
         : null;
 
+    // Let the adapter request a hidden continuation turn (e.g. after a background
+    // agent completes) using this turn's agent/model. It is serialized through the
+    // same queue, so it never runs concurrently with a live turn.
+    const enqueueFollowup = (followupText) =>
+      enqueue(sessionId, { text: followupText, agent, model, followup: true });
     try {
       await agent.runTurn({
         session: s,
@@ -290,6 +306,8 @@ async function drain(sessionId) {
         model,
         emit: trackedEmit,
         ask: makeAsk(sessionId),
+        enqueueFollowup,
+        followup: !!job.followup,
       });
     } catch (err) {
       emit(sessionId, { type: "error", message: err.message });
