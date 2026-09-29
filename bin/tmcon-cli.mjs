@@ -531,8 +531,14 @@ function askQuestion(e) {
 }
 
 // ── Input ──────────────────────────────────────────────
-rl.on("line", async (line) => {
-  const text = line.trim();
+// Buffering for multi-line paste: collect lines until a silent gap (no new input for DEBOUNCE_MS).
+// Paste events produce lines in rapid succession; manual input has a perceptible delay after Enter.
+// This lets us join pasted lines without affecting single-line or manual-entry latency.
+let inputBuffer = [];
+let lineTimeout = null;
+const DEBOUNCE_MS = 50; // silent gap (ms) that signals end of paste and start of manual input
+
+async function processInput(text) {
   shown = false; // the displayed prompt is finalized. Don't go clear it (it would erase the input echo)
   if (pendingAnswer) {
     if (pendingAnswer(text)) {
@@ -587,6 +593,17 @@ rl.on("line", async (line) => {
     say(`${C.err}${t("cli.sendFail", { msg: e.message })}${C.off}`);
   }
   prompt();
+}
+
+rl.on("line", (line) => {
+  inputBuffer.push(line);
+  clearTimeout(lineTimeout);
+  // Set a timer. If no more lines arrive within DEBOUNCE_MS, treat the buffered lines as complete input.
+  lineTimeout = setTimeout(() => {
+    const text = inputBuffer.join("\n").trim();
+    inputBuffer = [];
+    if (text) processInput(text);
+  }, DEBOUNCE_MS);
 });
 
 let interrupted = false;
