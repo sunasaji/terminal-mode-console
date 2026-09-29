@@ -75,14 +75,31 @@ const C = {
 const TTY = Boolean(stdout.isTTY);
 
 // ── Status line ──────────────────────────────────────
-// Show "what it's doing right now" directly above the input line (the same role as Waiting input on the glasses' bottom line).
-// Make the prompt two lines, "status line + input line", and let readline redraw them together.
+// Show "what it's doing right now" as a prefix on the input line (the same role as Waiting input on the glasses' bottom line).
+// The prompt is kept to a SINGLE physical line, "[status] input", on purpose: a multi-line prompt (status
+// on its own line above input) forces unpaint() to move the cursor up a row with a raw escape, which desyncs
+// readline's own cursor-row bookkeeping. At the bottom of the screen, where emitting a newline scrolls the
+// view, that desync made the next rl.prompt(true) redraw land a row too high and overwrite a real output line
+// — e.g. the 2nd option of a question would vanish (only ever visible once the block scrolled up). Keeping it
+// one line means unpaint() only ever clears the current row, so readline's state stays consistent.
 let statusLabel = t("state.waitingInput"),
   statusWait = false,
   t0 = 0,
   ticker = null;
 let basePrompt = "› ",
   shown = false;
+// True when the last thing written to stdout was a streamed text_delta that did NOT end in a newline,
+// i.e. the cursor is parked mid-line. Any other output (a tool line, the prompt, the next answer block)
+// must first break to a fresh line, otherwise it would be glued onto — or overwrite — the streamed text.
+// This is what keeps interleaved "text → tool → text" turns readable and scrolling, like the WebUI.
+let midLine = false;
+/** Finish the current streamed line (if any) so the next write starts clean at column 0. */
+function endStreamLine() {
+  if (midLine) {
+    stdout.write("\n");
+    midLine = false;
+  }
+}
 
 function statusText() {
   const secs = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
@@ -91,14 +108,16 @@ function statusText() {
     : "";
   return `${statusWait ? C.warn : C.dim}[${statusLabel}${el}]${C.off}`;
 }
-/** Clear the status line and the input line. Call before writing output (otherwise they overlap). */
+/** Clear the single-line prompt. Call before writing output (otherwise it overlaps).
+ *  Stays on the current row (\r + clear-line) so readline's cursor tracking is not disturbed. */
 function unpaint() {
   if (TTY && shown) {
-    stdout.write("\r\x1b[2K\x1b[1A\r\x1b[2K");
+    stdout.write("\r\x1b[2K");
     shown = false;
   }
 }
 const say = (s = "") => {
+  endStreamLine(); // don't glue this line onto unfinished streamed text
   unpaint();
   stdout.write(s + "\n");
 };
@@ -158,11 +177,12 @@ const rl = createInterface({
 });
 let closed = false,
   awaiting = false;
-// On a terminal, redraw the "status line + input line" every time. With a pipe on the other end, use a plain prompt as before.
+// On a terminal, redraw the single-line "[status] input" prompt every time. With a pipe on the other end, use a plain prompt as before.
 const prompt = () => {
   if (closed || !bootDone) return;
+  endStreamLine(); // never paint the prompt onto an unfinished streamed line
   if (!TTY) return rl.prompt();
-  rl.setPrompt(`${statusText()}\n${basePrompt}`);
+  rl.setPrompt(`${statusText()} ${basePrompt}`);
   rl.prompt(true); // redraw while preserving the characters being typed
   shown = true;
 };
@@ -376,7 +396,7 @@ function handle(e) {
         streaming = true;
       } else if (e.state === "text_end") {
         streaming = false;
-        stdout.write("\n");
+        endStreamLine(); // finish the streamed line (adds \n only if it didn't already end in one)
         prompt();
       }
       // The server is waiting on our response. It doesn't time out, so keep showing it.
@@ -391,7 +411,15 @@ function handle(e) {
       }
       break;
     case "text_delta":
-      stdout.write(e.text);
+      // The backend emits text_start only once per turn, so a text segment that resumes AFTER a tool call
+      // gets no fresh text_start — clear any prompt painted by the tool line before writing, or the text
+      // would land on the "[status] ›" line and be overwritten. During an uninterrupted stream shown is
+      // already false, so this is a no-op.
+      unpaint();
+      if (e.text) {
+        stdout.write(e.text);
+        midLine = !e.text.endsWith("\n");
+      }
       break;
     // Turn complete. If the concrete model ID actually used is present (extension field), show it in dim text.
     case "result":
