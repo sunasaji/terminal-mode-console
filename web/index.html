@@ -1,8 +1,14 @@
 <!doctype html>
-<html lang="en">
+<!-- translate="no" is the HTML-standard way to tell Edge (Microsoft Translator) not to offer
+     translation; Chrome uses the notranslate meta below. See the note there for why. -->
+<html lang="en" translate="no">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <!-- The UI always localizes to navigator.languages, so browser translation is never needed.
+     Without this, mobile Chrome sees the initial `<html lang="en">` (JS switches it to the real
+     locale only after the locale JSON loads) and offers to translate the already-localized page. -->
+    <meta name="google" content="notranslate" />
     <!-- The static title / theme-color / favicon values are fallbacks used before JS loads.
      After loading, applyProviderChrome overrides them per provider (claude/codex/local). -->
     <title>terminal-mode-console</title>

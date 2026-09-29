@@ -306,10 +306,30 @@ const server = createServer(async (req, res) => {
   // without restarting.
   if (p === "/" || p === "/index.html") {
     try {
-      const html = await readFile(join(HERE, "web", "index.html"));
+      let html = (await readFile(join(HERE, "web", "index.html"))).toString(
+        "utf8",
+      );
+      // Set the initial <html lang> from Accept-Language so the very first paint
+      // declares the right language. Without it the static lang="en" makes
+      // browsers (incl. Firefox) offer to translate the already-localized page
+      // before the client JS refines lang via navigator.languages. We only take
+      // the first tag and its primary/region subtags (no q-value parsing — the
+      // browser's top preference is what matters), and sanitize to a BCP 47-ish
+      // token so the header can't inject markup into the attribute.
+      const first = (req.headers["accept-language"] || "")
+        .split(",")[0]
+        .split(";")[0]
+        .trim();
+      const lang = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(first) ? first : "en";
+      html = html.replace(
+        '<html lang="en" translate="no">',
+        `<html lang="${lang}" translate="no">`,
+      );
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-cache",
+        // The body varies by Accept-Language (the injected lang above).
+        Vary: "Accept-Language",
         "Access-Control-Allow-Origin": "*",
       });
       return res.end(html);
