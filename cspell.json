@@ -21,6 +21,8 @@
     "lmstudio",
     "llamacpp",
     "dedup",
+    "desync",
+    "desyncs",
     "tmcon",
     "codex",
     "anthropic",
