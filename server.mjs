@@ -320,7 +320,9 @@ const server = createServer(async (req, res) => {
         .split(",")[0]
         .split(";")[0]
         .trim();
-      const lang = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(first) ? first : "en";
+      const lang = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(first)
+        ? first
+        : "en";
       html = html.replace(
         '<html lang="en" translate="no">',
         `<html lang="${lang}" translate="no">`,
