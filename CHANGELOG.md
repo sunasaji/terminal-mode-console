@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Config file support: the server (`tmcon`) and the CLI (`tmcon-cli`) now read a
+  plain `KEY=VALUE` `.env` config file by default from
+  `~/.config/terminal-mode-console/env` (override with `--config <path>` or
+  `TMCON_CONFIG`). Settings resolve as **arguments > environment variables >
+  config file > built-in defaults**; a real environment variable always wins
+  over the same key in the file.
+- Server command-line arguments `--host`, `--port`, `--token`, `--config`, plus
+  `--version` / `--help`. `tmcon-cli` gained `--config` and `--version`.
+
+### Changed
+
+- Renamed configuration environment variables to the `TMCON_` namespace for
+  collision-safety and traceability:
+  - `HOST` → `TMCON_HOST`, `PORT` → `TMCON_PORT` (the legacy `HOST` / `PORT` are
+    still accepted as fallbacks, e.g. for PaaS that inject `PORT`).
+  - CLI: `EVEN_URL` → `TMCON_URL`, `EVEN_TOKEN` → `TMCON_TOKEN`, `EVEN_PROVIDER`
+    → `TMCON_PROVIDER`, `EVEN_MODEL` → `TMCON_MODEL`.
+  - `/api/info` exposure reporting: `EVEN_TERMINAL_EXPOSE_PROVIDER` →
+    `TMCON_EXPOSE_PROVIDER`, `EVEN_HOST_MODE` → `TMCON_HOST_MODE`. The old
+    `EVEN_*` names are no longer read.
+
+### Fixed
+
+- Add `config.mjs` and `session-metadata.mjs` to the published `files` list.
+  Both are imported by `server.mjs`, so a global/published install (`npm i -g`)
+  previously crashed at startup with `ERR_MODULE_NOT_FOUND`
+  (`session-metadata.mjs` was a pre-existing omission).
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed

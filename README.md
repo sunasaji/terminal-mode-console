@@ -176,8 +176,8 @@ the exposed surface minimal and the token unguessable.**
 
 - It listens on loopback only (`127.0.0.1`) by default. Prefer terminating TLS
   at a front proxy (`tailscale serve` recommended) for reachability.
-- Only set `HOST=0.0.0.0` when you deliberately want a direct LAN bind; never do
-  so on an untrusted network.
+- Only set `TMCON_HOST=0.0.0.0` when you deliberately want a direct LAN bind;
+  never do so on an untrusted network.
 
 For details, see the security section of the
 [Developer & Operations Guide](docs/developer.md) and [SECURITY.md](SECURITY.md).

@@ -52,6 +52,8 @@
   },
   "files": [
     "server.mjs",
+    "config.mjs",
+    "session-metadata.mjs",
     "bus.mjs",
     "i18n.mjs",
     "agents/",
