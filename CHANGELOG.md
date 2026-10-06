@@ -35,6 +35,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Both are imported by `server.mjs`, so a global/published install (`npm i -g`)
   previously crashed at startup with `ERR_MODULE_NOT_FOUND`
   (`session-metadata.mjs` was a pre-existing omission).
+- Mark the `bin` entry points (`server.mjs`, `bin/tmcon-cli.mjs`) executable so
+  they can be run directly via their shebang.
 
 ## [0.3.1] - 2026-09-22
 
