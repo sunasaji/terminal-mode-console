@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `tmcon-cli` now shows token usage on the prompt line, after the status:
+  `[Waiting for input] Ctx:2% 5h:8% 1w:24% ›`. Thresholds match the WebUI (dim
+  below 50%, yellow below 80%, red at 80% and above, suffixed with `!` so the
+  warning reads on a colorless terminal); a local backend shows
+  `Tok:used/max` in place of the 5h/1w windows, and windows the backend cannot
+  report are omitted. Usage is read when the session opens and when a turn
+  completes — never polled — and the cells are trimmed from the right (`1w`
+  first) on a narrow terminal so the prompt always stays one physical line.
 - Config file support: the server (`tmcon`) and the CLI (`tmcon-cli`) now read a
   plain `KEY=VALUE` `.env` config file by default from
   `~/.config/terminal-mode-console/env` (override with `--config <path>` or

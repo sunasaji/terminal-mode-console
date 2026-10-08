@@ -11,6 +11,9 @@
     "locales/**"
   ],
   "words": [
+    "Jamo",
+    "Kangxi",
+    "Bopomofo",
     "dotdirs",
     "fsdirs",
     "unarchiving",
