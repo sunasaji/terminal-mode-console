@@ -11,6 +11,8 @@
     "locales/**"
   ],
   "words": [
+    "katex",
+    "smol",
     "Jamo",
     "Kangxi",
     "Bopomofo",
