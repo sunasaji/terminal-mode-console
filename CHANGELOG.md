@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- WebUI: on viewports 320px tall or shorter, the header and footer fold away
+  while a session is open, leaving a thin grip at the top and the status row
+  alone at the bottom. A bar slides open when the pointer comes near its
+  screen edge, when it is hovered, or when focus moves inside it; tapping a grip
+  pins that bar open for touch screens. The collapsed bars occupy body's
+  padding, so opening one overlays the log rather than reflowing it. The
+  threshold can be overridden from the URL — `?compact=1` / `?compact=0` to
+  force it on or off, `?compact=<px>` to move it.
+- WebUI: `?diag=1` draws a viewport ruler (a dashed frame on the browser's idea
+  of the viewport edges plus `win` / `doc` / `scrollW` / `visualViewport` / `dpr`
+  readouts), to tell a display that crops the window apart from a page that
+  overflows on its own. `?width=<px>` / `?width=screen` then holds the page to
+  the visible part of such a window.
 - `tmcon-cli` now shows token usage on the prompt line, after the status:
   `[Waiting for input] Ctx:2% 5h:8% 1w:24% ›`. Thresholds match the WebUI (dim
   below 50%, yellow below 80%, red at 80% and above, suffixed with `!` so the

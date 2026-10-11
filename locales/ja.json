@@ -19,6 +19,8 @@
   "backend.requested": "provider={provider}（要求: {requested}）",
   "backend.unreachable": "接続できません",
   "backend.unreachableHint": "接続先から応答がありません。LLM_BASE_URL とバックエンドの起動状態を確認してください。",
+  "compact.pinBottom": "下部バーを開いたままにする（もう一度押すと折りたたむ）",
+  "compact.pinTop": "上部バーを開いたままにする（もう一度押すと折りたたむ）",
   "cwd.placeholder": "cwd で絞り込み / 新規作成先",
   "cwd.title": "入力した文字列を含む作業ディレクトリのセッションだけを一覧に出します。ここに入れたパスが「新規」の作業ディレクトリにもなります（空ならサーバー既定）。",
   "error.missingToken": "?token=… が URL にありません。ペアリング URL をそのまま開いてください。",

@@ -677,12 +677,169 @@
       .d2h-wrap .d2h-file-wrapper {
         border-color: #2c333d;
       }
+
+      /* ── Short viewports: slide-away header / footer ────────────────────
+     On a short screen (a landscape phone, a small floating window, a 320px-tall
+     panel) the two bars eat most of the height and barely any log is left. So
+     once a session is open — body.sess — and the viewport is short enough —
+     body.compact, decided in JS so the threshold stays overridable, see
+     paintCompact() — both bars become overlays pinned to the screen edges,
+     collapsed down to a grip (header) and the grip plus the status row (footer).
+     A bar slides open when
+       - the pointer comes near its screen edge (body.topNear / .botNear, set by JS),
+       - the pointer is already over it or focus is inside it (:hover / :focus-within), or
+       - its grip was tapped to pin it open (body.topPin / .botPin) — the path for
+         touch screens, where "the pointer comes near" means nothing.
+     The log does not jump as a bar opens: the collapsed bars occupy body's
+     padding, so an opening bar overlays the log instead of reflowing it. */
+      .bargrip {
+        display: none; /* shown in compact mode only */
+        justify-content: center;
+        align-items: center;
+        height: var(--grip-h, 16px);
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: #161a20;
+        color: #6b7481;
+        font-size: 11px;
+        line-height: 1;
+      }
+      /* The header is a wrapping row, so the grip has to claim a whole row of it.
+     The footer cannot afford a row of its own — every pixel there is taken from
+     the log — so its grip rides inside the status row instead, left of the text. */
+      header > .bargrip {
+        flex: 1 0 100%;
+      }
+      #stateRow > .bargrip {
+        flex: none;
+        width: 22px;
+      }
+      .bargrip[aria-pressed="true"] {
+        color: var(--accent);
+        background: #1e242c;
+      }
+      body.compact.sess {
+        --grip-h: 16px;
+        /* The collapsed footer's bottom padding. Declared here, not on the footer,
+       so that --bar-bot-h below resolves on this element; the open footer raises
+       it to the normal 8px without moving body's padding. */
+        --bar-bot-pad: 3px;
+        --bar-top-h: calc(var(--grip-h) + 3px); /* + the accent border-top */
+        /* #stateRow (min-height 1.4em) + border-top + --bar-bot-pad. The collapsed
+       footer is nothing but the status row: the bars are fixed, so this padding
+       is part of the 1.4em box and would otherwise crop the text it shows. */
+        --bar-bot-h: calc(1.4em + 1px + var(--bar-bot-pad));
+        padding-top: var(--bar-top-h);
+        padding-bottom: var(--bar-bot-h);
+      }
+      body.compact.sess > header,
+      body.compact.sess > footer {
+        position: fixed;
+        left: 0;
+        right: 0;
+        /* Fixed bars are sized against the viewport, so they ignore the cap body
+       gets from ?width below — unless they take it themselves. Unset (the normal
+       case) width:auto resolves against left/right and spans the viewport. */
+        width: var(--fit-width, auto);
+        z-index: 10; /* above the log, below #usagePopup */
+        overflow: hidden;
+        transition: max-height 0.14s ease;
+      }
+      body.compact.sess > header {
+        top: 0;
+        max-height: var(--bar-top-h);
+        padding-top: 0; /* put the grip right below the accent band */
+      }
+      body.compact.sess > footer {
+        --btns: hidden;
+        bottom: 0;
+        max-height: var(--bar-bot-h);
+        padding-top: 0;
+        padding-bottom: var(--bar-bot-pad);
+      }
+      body.compact.sess > header:hover,
+      body.compact.sess > header:focus-within,
+      body.compact.sess.topNear > header,
+      body.compact.sess.topPin > header,
+      body.compact.sess > footer:hover,
+      body.compact.sess > footer:focus-within,
+      body.compact.sess.botNear > footer,
+      body.compact.sess.botPin > footer {
+        --btns: visible;
+        --bar-bot-pad: 8px; /* open: back to the normal footer padding */
+        max-height: 75dvh;
+        overflow-y: auto;
+      }
+      body.compact.sess .bargrip {
+        display: flex;
+      }
+      /* A collapsed bar has to clip what does not fit, not squeeze it: left to
+     shrink, the bottom-aligned button column would slide up into the strip. */
+      body.compact.sess > footer > .footcols {
+        flex: none;
+      }
+      /* Even at full height, the button column is as tall as the whole row, so its
+     top edge sits right beside the status row and peeks out of the collapsed strip.
+     Hide it along with the bar. --btns is inherited from the footer, so the open
+     state needs no second copy of the trigger list above. */
+      body.compact.sess .colbtns {
+        visibility: var(--btns);
+      }
+      /* An open footer must still leave some log visible: at 320px the usual 40vh
+     textarea is 128px, and the button column stacks on top of that. */
+      body.compact.sess #input {
+        max-height: 26dvh;
+      }
+
+      /* ?width=<px> — hold the page to the part of the window the display really
+     shows (see the paintFitWidth() comment). Off unless the URL asks for it. */
+      body.fit-width {
+        max-width: var(--fit-width);
+      }
+
+      /* ── ?diag=1 — viewport ruler ────────────────────────────────────────
+     Draws the viewport exactly where the browser believes its edges are, and
+     prints the sizes. On a device that shows only part of the browser window
+     (an embedded/kiosk viewer, a cropped mirror) an edge of the frame is simply
+     not on screen, which tells that case apart from the page overflowing on its
+     own — where the frame is complete but html/body scrollWidth exceeds it. */
+      #diag {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        border: 1px dashed #ef8f8f;
+        pointer-events: none;
+        font-size: 11px;
+        line-height: 1.3;
+        color: #ef8f8f;
+      }
+      #diag > span {
+        position: absolute;
+        top: 1px;
+        left: 1px;
+        padding: 1px 4px;
+        background: #0b0d10d9;
+      }
     </style>
     <link rel="stylesheet" href="vendor/hljs-github-dark.min.css" />
     <link rel="stylesheet" href="vendor/diff2html.min.css" />
   </head>
   <body>
     <header>
+      <!-- Grip, shown in compact mode only (see body.compact.sess in the CSS).
+       Tapping it pins the bar open, which is how a touch screen (no pointer to
+       bring near the edge) reaches the collapsed bar. -->
+      <button
+        class="bargrip"
+        type="button"
+        data-bar="top"
+        aria-pressed="false"
+        data-i18n-title="compact.pinTop"
+        title="Keep the top bar open (tap again to collapse it)"
+      >
+        ⋯
+      </button>
       <select id="sessions"></select>
       <input
         id="cwdBox"
@@ -733,6 +890,19 @@
         <!-- Left column: status row + attachment preview + textarea -->
         <div class="colmain">
           <div id="stateRow">
+            <!-- Same grip as in the header, for the bottom bar (compact mode only).
+             It sits inside the status row rather than above it: the collapsed
+             footer is exactly that row, and a row of its own would double it. -->
+            <button
+              class="bargrip"
+              type="button"
+              data-bar="bottom"
+              aria-pressed="false"
+              data-i18n-title="compact.pinBottom"
+              title="Keep the bottom bar open (tap again to collapse it)"
+            >
+              ⋯
+            </button>
             <div id="state">Waiting input</div>
             <div id="usage" hidden>
               <span id="contextUsage">Ctx:—</span>
@@ -1396,6 +1566,7 @@
         usageEl.hidden = true;
         usagePopup.hidden = true;
         sid = id;
+        paintSessionChrome(); // A session is open: compact viewports may hide the bars now
         sessionReadOnly = readOnly;
         lastEventId = 0; // New session, so reset the catch-up baseline too
         streamEpoch = ""; // New session: forget the previous instance's epoch (a fresh connect never resyncs)
@@ -2144,6 +2315,7 @@
         }
         sel.value = "";
         sid = null;
+        paintSessionChrome(); // No session: bring both bars back into the normal layout
         es?.close();
         es = null;
         log.textContent = "";
@@ -2525,6 +2697,113 @@
           send();
         }
       });
+
+      // ── Compact chrome (short viewports) ───────────────────────────────
+      // On a short viewport the header and footer collapse into grips once a
+      // session is open (see body.compact.sess in the CSS). CSS expresses two of
+      // the reveal triggers by itself (:hover, :focus-within); the rest lives
+      // here: deciding what counts as "short", the pointer merely approaching a
+      // screen edge, and a grip tap that pins a bar open where there is no pointer.
+      //
+      // The threshold is 320px of viewport height, overridable from the URL
+      // because a device's CSS viewport is not always the size its screen
+      // suggests: ?compact=1 forces the collapsing on, ?compact=0 off, and
+      // ?compact=<px> moves the threshold (e.g. ?compact=480).
+      const compactParam = qs.get("compact");
+      const compactMaxH = Number(compactParam) > 1 ? Number(compactParam) : 320;
+      const compactMQ = matchMedia(`(max-height: ${compactMaxH}px)`);
+      const NEAR_TOP = 44; // px from the top edge that counts as reaching for the header
+      const NEAR_BOTTOM_EDGE = 60; // the footer grip + status row is taller, so allow more
+      function isCompact() {
+        if (compactParam === "1") return true;
+        if (compactParam === "0") return false;
+        return compactMQ.matches;
+      }
+      function paintCompact() {
+        document.body.classList.toggle("compact", isCompact());
+      }
+      compactMQ.addEventListener("change", paintCompact); // crossing the threshold
+      paintCompact();
+      function setBarNear(top, bottom) {
+        document.body.classList.toggle("topNear", top);
+        document.body.classList.toggle("botNear", bottom);
+      }
+      window.addEventListener(
+        "pointermove",
+        (ev) => {
+          // Touch has no hover: a tap near the edge would open a bar and immediately
+          // lose it again. Touch screens use the grip instead.
+          if (!isCompact() || ev.pointerType === "touch") return;
+          setBarNear(
+            ev.clientY <= NEAR_TOP,
+            ev.clientY >= innerHeight - NEAR_BOTTOM_EDGE,
+          );
+        },
+        { passive: true },
+      );
+      // Leaving the window must not leave a bar stuck open.
+      document.addEventListener("pointerleave", () => setBarNear(false, false));
+      window.addEventListener("blur", () => setBarNear(false, false));
+      for (const grip of document.querySelectorAll(".bargrip")) {
+        grip.onclick = () => {
+          const cls = grip.dataset.bar === "top" ? "topPin" : "botPin";
+          const pinned = !document.body.classList.contains(cls);
+          document.body.classList.toggle(cls, pinned);
+          grip.setAttribute("aria-pressed", String(pinned));
+          // The grip keeps focus after the tap, and :focus-within would hold the bar
+          // open even once unpinned — so hand focus back when collapsing.
+          if (!pinned) grip.blur();
+        };
+      }
+      // ?width=<px>, or ?width=screen to take screen.width, caps the page width.
+      // Some embedded displays hand the browser a window wider than the panel they
+      // actually show — the G2 viewer reports win 638 against a 576px screen — and
+      // the right edge of every line then lands outside the visible area. Nothing
+      // in the page can detect that (scrollWidth matches the viewport exactly;
+      // ?diag=1 prints both numbers), hence a knob rather than a heuristic: a window
+      // wider than the screen is perfectly normal on a desktop, zoomed out or
+      // straddling two monitors.
+      const widthParam = qs.get("width");
+      function paintFitWidth() {
+        const w = widthParam === "screen" ? screen.width : Number(widthParam);
+        const on = Number.isFinite(w) && w > 0;
+        document.body.style.setProperty("--fit-width", on ? `${w}px` : null);
+        document.body.classList.toggle("fit-width", on);
+      }
+      if (widthParam) {
+        paintFitWidth();
+        addEventListener("resize", paintFitWidth); // ?width=screen follows the screen
+      }
+
+      // ?diag=1 draws the viewport ruler described in the CSS above. Pure diagnosis:
+      // nothing else in the UI reads it, and without the flag nothing is created.
+      if (qs.get("diag") === "1") {
+        const box = document.createElement("div");
+        box.id = "diag";
+        const txt = document.createElement("span");
+        box.appendChild(txt);
+        document.body.appendChild(box);
+        const paintDiag = () => {
+          const d = document.documentElement;
+          const vv = window.visualViewport;
+          txt.textContent =
+            `win ${innerWidth}x${innerHeight} doc ${d.clientWidth}x${d.clientHeight} ` +
+            `scrollW html ${d.scrollWidth} body ${document.body.scrollWidth} ` +
+            (vv
+              ? `vv ${Math.round(vv.width)}x${Math.round(vv.height)}@${Math.round(vv.offsetLeft)},${Math.round(vv.offsetTop)} x${vv.scale} `
+              : "") +
+            `dpr ${devicePixelRatio} screen ${screen.width}x${screen.height}`;
+        };
+        paintDiag();
+        addEventListener("resize", paintDiag);
+        window.visualViewport?.addEventListener("resize", paintDiag);
+      }
+
+      // Collapsing only makes sense once a session is open: before that the session
+      // pulldown is the only thing on screen worth having. body.sess gates it all.
+      function paintSessionChrome() {
+        document.body.classList.toggle("sess", !!sid);
+      }
 
       // Update the model-selection pulldown. Options come from each backend's describe().models.
       // currentModel is the last model specified in this conversation or provider scope (the remembered value).
