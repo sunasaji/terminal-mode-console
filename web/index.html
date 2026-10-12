@@ -1470,6 +1470,20 @@
           ? `${secs}s`
           : `${Math.floor(secs / 60)}m${secs % 60 ? `${secs % 60}s` : ""}`;
       }
+      // How often the elapsed-seconds counter in the status row is repainted.
+      // On a compact viewport that counter is the ONLY thing on screen that
+      // changes every second, and on the glasses every change is a tile pushed
+      // over BLE — a second of battery and bandwidth spent to advance a number
+      // nobody is reading that closely. 10s there, 1s everywhere else. Reading
+      // body.compact rather than isCompact() keeps the ?compact= override in one
+      // place and avoids depending on when that module's consts are initialized.
+      const STATE_TICK_MS = 1000;
+      const STATE_TICK_MS_COMPACT = 10000;
+      function stateTickMs() {
+        return document.body.classList.contains("compact")
+          ? STATE_TICK_MS_COMPACT
+          : STATE_TICK_MS;
+      }
       function paintState() {
         const secs = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
         // The elapsed seconds are driven by a local timer. Matched to the same behavior as the original app.
@@ -1507,7 +1521,7 @@
           activityKind = "turn_start";
         }
         if (on && !timer) {
-          timer = setInterval(paintState, 1000);
+          timer = setInterval(paintState, stateTickMs());
         }
         if (!on) {
           t0 = 0;
@@ -1543,7 +1557,7 @@
         $("stop").disabled = false;
         if (!t0) {
           t0 = Date.now();
-          timer = setInterval(paintState, 1000);
+          timer = setInterval(paintState, stateTickMs());
         }
         paintState();
         paintArchiveAction();
@@ -2720,7 +2734,16 @@
         return compactMQ.matches;
       }
       function paintCompact() {
+        const was = document.body.classList.contains("compact");
         document.body.classList.toggle("compact", isCompact());
+        // The status-row tick rate follows the same threshold (stateTickMs), and a
+        // running timer keeps whatever interval it was armed with — so a window
+        // resized across the threshold mid-turn would keep ticking at the old rate
+        // until the turn ended. Re-arm it instead.
+        if (timer && was !== document.body.classList.contains("compact")) {
+          clearInterval(timer);
+          timer = setInterval(paintState, stateTickMs());
+        }
       }
       compactMQ.addEventListener("change", paintCompact); // crossing the threshold
       paintCompact();

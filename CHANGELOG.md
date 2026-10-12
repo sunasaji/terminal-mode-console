@@ -15,7 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pins that bar open for touch screens. The collapsed bars occupy body's
   padding, so opening one overlays the log rather than reflowing it. The
   threshold can be overridden from the URL — `?compact=1` / `?compact=0` to
-  force it on or off, `?compact=<px>` to move it.
+  force it on or off, `?compact=<px>` to move it. In compact mode the status
+  row's elapsed-seconds counter also ticks every 10s instead of every second:
+  on glasses it is the only thing on an idle screen that changes, and every
+  change is a tile pushed over BLE.
 - WebUI: `?diag=1` draws a viewport ruler (a dashed frame on the browser's idea
   of the viewport edges plus `win` / `doc` / `scrollW` / `visualViewport` / `dpr`
   readouts), to tell a display that crops the window apart from a page that
