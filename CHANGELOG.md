@@ -19,6 +19,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row's elapsed-seconds counter also ticks every 10s instead of every second:
   on glasses it is the only thing on an idle screen that changes, and every
   change is a tile pushed over BLE.
+- WebUI: on a folded viewport, keeping the wheel scrolling down at the end of
+  the log focuses the text field — which slides the footer open by itself —
+  instead of having to find the grip, pin the bar and then tap the field.
+  A turn of the wheel back up — or Escape — blurs the field, which collapses
+  the footer again; that notch is spent on closing and scrolls nothing
+  underneath, since closing already hands ~110px of screen back to the log and
+  one notch should do one thing. Over the field itself an upward turn scrolls a
+  long draft first, and only puts the field away once that draft is at its own
+  top; the text survives either way. The price is **two notches**
+  of wheel travel the log could not absorb, within one stroke (a 2s gap, or a
+  turn back up, starts it over — two deliberate clicks of the wheel are a
+  second or more apart and must still count as one gesture) — a count rather than a distance, since a
+  notch is 100px on one mouse, 53px on the next and 3 lines in Firefox's line
+  mode, and any fixed pixel threshold is three notches for somebody. It is
+  floored at 80px and capped at 150px of overscroll, so a trackpad's stream of
+  10px dribbles (and the inertial tail that keeps firing them past the bottom)
+  cannot pop the keyboard up on someone merely coasting to a stop, and a coarse
+  wheel cannot demand a long push. The stroke is measured against the page's own
+  running position rather than the live `scrollTop`, because `wheel` fires
+  before the scroll it causes and smooth scrolling then animates it over
+  ~150ms — read live, the overscroll of the first notches goes missing and the
+  gesture silently costs an extra turn of the wheel.
+- WebUI: `?diag=1` also prints the bounce gesture's arithmetic on a second line
+  — `wheel <deltaY>/<deltaMode> = <px> over <reached>/<needed>` — so a wheel
+  that takes one turn too many can be read off the screen rather than guessed
+  at from the outside.
 - WebUI: `?diag=1` draws a viewport ruler (a dashed frame on the browser's idea
   of the viewport edges plus `win` / `doc` / `scrollW` / `visualViewport` / `dpr`
   readouts), to tell a display that crops the window apart from a page that

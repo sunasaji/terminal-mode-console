@@ -821,6 +821,10 @@
         padding: 1px 4px;
         background: #0b0d10d9;
       }
+      /* The second span is the bounce-gesture readout (see diagBounce). */
+      #diag > span + span {
+        top: 17px;
+      }
     </style>
     <link rel="stylesheet" href="vendor/hljs-github-dark.min.css" />
     <link rel="stylesheet" href="vendor/diff2html.min.css" />
@@ -2710,6 +2714,13 @@
           ev.preventDefault();
           send();
         }
+        // Escape hands the screen back to the log. It matters on a compact
+        // viewport, where the footer is held open by the focus inside it
+        // (:focus-within): blurring is what collapses it again, and the bounce
+        // gesture below is how it was opened, so there is no grip to tap back.
+        // (A turn of the wheel back up blurs it too — see that gesture.)
+        // isComposing: Escape cancels an IME conversion, it must not steal that.
+        if (ev.key === "Escape" && !ev.isComposing) ev.currentTarget.blur();
       });
 
       // ── Compact chrome (short viewports) ───────────────────────────────
@@ -2778,6 +2789,128 @@
           if (!pinned) grip.blur();
         };
       }
+      // Keep scrolling down at the end of the log and the text field takes focus
+      // — which opens the collapsed footer by itself, through the :focus-within
+      // rule above. Reaching the field otherwise takes two deliberate taps (find
+      // the grip, pin the bar, then the field), and "I have read to the end and
+      // want to reply" leaves the reader exactly where this gesture starts: at
+      // the bottom, still pushing the wheel.
+      //
+      // What counts is the travel the log could NOT absorb, which is what
+      // "bouncing" means — and the stroke is measured against OUR OWN running
+      // position (pos), not against log.scrollTop as read inside the handler.
+      // Two things make the live scrollTop useless here:
+      //   - wheel fires BEFORE the scroll it causes, so the notch that lands on
+      //     the bottom still arrives with the bottom not yet reached, and
+      //   - smooth scrolling then animates that scroll over ~150ms while the
+      //     next notches keep coming, so each of them reads a position that has
+      //     not caught up with the notch before it.
+      // Either way the overscroll goes missing and the gesture quietly costs an
+      // extra turn of the wheel. So pos is seeded from the DOM when a stroke
+      // begins and advanced by the deltas themselves; max(pos, scrollTop) keeps
+      // it honest when the log moves on its own (new output arrives and
+      // autoScroll() jumps to the new bottom).
+      //
+      // The price is two notches of the wheel in hand, a count rather than a
+      // distance: a notch is 100px on one mouse, 53px on the next, and 3 lines
+      // in Firefox's line mode, so any fixed pixel threshold is three notches
+      // for somebody. OVER_MAX caps what a coarse wheel can demand; OVER_MIN
+      // floors it, so that a trackpad's stream of 10px dribbles — and the
+      // inertial tail that keeps firing them long after the bottom is reached —
+      // cannot pop the keyboard up on someone merely coasting to a stop.
+      const OVER_MIN = 80; // px of overscroll never to fire below
+      const OVER_MAX = 150; // px of overscroll always enough
+      // What ends a stroke. Generous, because two deliberate clicks of the
+      // wheel are a second or more apart and must still count as one gesture —
+      // where a mouse of ~100px per notch needs exactly two of them. The window
+      // is not what protects against an accidental trigger (OVER_MIN and the
+      // two-notch price are): overscroll only accumulates while the log is
+      // already at the bottom and still being pushed down, which is the gesture
+      // itself. It is here so that notches minutes apart are not summed.
+      const OVER_IDLE_MS = 2000;
+      let pos = 0, // where this stroke has pushed the log, px
+        notch = 0, // the largest single delta it has shown, px
+        overAt = 0; // when its last wheel event arrived
+      let diagBounce = null; // set by ?diag=1 below, to show the numbers
+      log.addEventListener(
+        "wheel",
+        (ev) => {
+          const el = $("input");
+          if (!isCompact() || !sid || document.activeElement === el) {
+            overAt = 0;
+            return;
+          }
+          // Firefox reports wheel deltas in lines, sometimes pages, rather than
+          // pixels (deltaMode 1 / 2) — and Firefox is what the glasses' viewer
+          // is — so normalize to pixels first. The exact px-per-line hardly
+          // matters now that the threshold is two of whatever a notch turns out
+          // to be, but the accumulator has to be in one unit.
+          const px =
+            ev.deltaMode === 1
+              ? ev.deltaY * 16
+              : ev.deltaMode === 2
+                ? ev.deltaY * log.clientHeight
+                : ev.deltaY;
+          const now = performance.now();
+          if (px <= 0 || now - overAt > OVER_IDLE_MS) {
+            pos = log.scrollTop; // a new stroke, or a turn back up: re-seed
+            notch = 0;
+            overAt = now;
+            if (px <= 0) return;
+          }
+          overAt = now;
+          notch = Math.max(notch, px);
+          pos = Math.max(pos, log.scrollTop) + px;
+          const over = pos - (log.scrollHeight - log.clientHeight);
+          const need = Math.min(OVER_MAX, Math.max(OVER_MIN, 2 * notch));
+          diagBounce?.(ev, px, over, need);
+          if (over < need) return;
+          pos = log.scrollHeight - log.clientHeight; // spent
+          // preventScroll: focusing a field inside a fixed bar otherwise scrolls
+          // it into view, which takes the log off its bottom and drops `stick`
+          // — the reader would stop following the output by asking to reply to it.
+          el.focus({ preventScroll: true });
+        },
+        { passive: true }, // read-only: the wheel keeps its native behavior
+      );
+      // And a turn back up puts it away again: the field is held on screen by
+      // the focus inside it, so blurring is what collapses the footer. The
+      // gesture that opened it should be the gesture that closes it — Escape
+      // works too, but a display driven by two-finger scrolling has no Escape
+      // key to reach for.
+      //
+      // Listened for on window rather than on the log, because by then the open
+      // footer covers the bottom of the screen and the pointer may well be over
+      // it — on a display driven by injected wheel events the pointer sits
+      // wherever it was last put, which is usually the log. The one place an
+      // upward turn means something else is inside the field itself, where it
+      // scrolls a draft too long to fit: there it only means "back to the log"
+      // once that draft is at its own top. A draft is never lost by this — the
+      // textarea keeps its text while collapsed, and bouncing at the bottom
+      // again brings it back.
+      //
+      // That notch is SPENT on closing: preventDefault keeps it from also
+      // scrolling whatever it was pointing at, which is why this one listener
+      // cannot be passive. Closing the field already hands ~110px of screen back
+      // to the log, so a notch that did both would move the text twice over, and
+      // "one notch, one thing" is the rule the gesture opened with.
+      addEventListener(
+        "wheel",
+        (ev) => {
+          const el = $("input");
+          if (
+            !isCompact() ||
+            !sid ||
+            ev.deltaY >= 0 ||
+            document.activeElement !== el ||
+            (ev.target === el && el.scrollTop > 0)
+          )
+            return;
+          ev.preventDefault();
+          el.blur();
+        },
+        { passive: false }, // the only wheel listener here that cancels
+      );
       // ?width=<px>, or ?width=screen to take screen.width, caps the page width.
       // Some embedded displays hand the browser a window wider than the panel they
       // actually show — the G2 viewer reports win 638 against a 576px screen — and
@@ -2820,6 +2953,18 @@
         paintDiag();
         addEventListener("resize", paintDiag);
         window.visualViewport?.addEventListener("resize", paintDiag);
+        // Second line: the bottom-bounce gesture's own arithmetic, so a wheel
+        // that takes one turn too many can be read off the screen instead of
+        // guessed at. `deltaY/deltaMode` is what the device sent, `px` what that
+        // is worth here, and `over/need` how far the stroke has got — need is
+        // two notches of this wheel, clamped to OVER_MIN..OVER_MAX.
+        const wheelTxt = document.createElement("span");
+        box.appendChild(wheelTxt);
+        diagBounce = (ev, px, over, need) => {
+          wheelTxt.textContent =
+            `wheel ${ev.deltaY}/${ev.deltaMode} = ${Math.round(px)}px ` +
+            `over ${Math.round(over)}/${Math.round(need)}`;
+        };
       }
 
       // Collapsing only makes sense once a session is open: before that the session
