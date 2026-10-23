@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-23
+
 ### Added
 
 - WebUI: on viewports 320px tall or shorter, the header and footer fold away
@@ -175,6 +177,7 @@ pending"}` (previously always acknowledged with `200`).
 - Linting and formatting tooling: ESLint, Prettier, markdownlint, stylelint,
   HTMLHint, and cspell.
 
-[Unreleased]: https://github.com/sunasaji/terminal-mode-console/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/sunasaji/terminal-mode-console/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/sunasaji/terminal-mode-console/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/sunasaji/terminal-mode-console/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sunasaji/terminal-mode-console/releases/tag/v0.3.0
