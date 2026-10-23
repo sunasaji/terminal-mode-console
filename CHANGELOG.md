@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Pinned `markdown-it` to 14.3.3 (via the existing `markdownlint-cli`
+  `overrides` block) to clear two `npm audit` advisories, one of them high
+  severity. Dev-tooling only — the published package has no runtime
+  dependencies, so this changes nothing for installs and is not a release.
+  The three remaining advisories live inside the optional Claude SDK's own
+  peer tree (`@modelcontextprotocol/sdk` → `hono`, `ip-address`) and need an
+  upstream SDK release; see [docs/maintaining.md](docs/maintaining.md).
+
 ## [0.4.0] - 2026-10-23
 
 ### Added
