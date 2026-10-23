@@ -11,6 +11,11 @@
     "locales/**"
   ],
   "words": [
+    "katex",
+    "smol",
+    "Jamo",
+    "Kangxi",
+    "Bopomofo",
     "dotdirs",
     "fsdirs",
     "unarchiving",

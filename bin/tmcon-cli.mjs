@@ -18,6 +18,9 @@
 // The conversation state lives on the server, so the context is not lost when you disconnect.
 // Reconnect and you can read the continuation from history (tmux is not required).
 //
+// On a terminal the prompt line carries the current state and the token usage:
+//   [Waiting for input] Ctx:2% 5h:8% 1w:24% ›
+//
 // Zero dependencies (Node 20+).
 
 import { createInterface } from "node:readline";
@@ -120,12 +123,14 @@ function endStreamLine() {
   }
 }
 
-function statusText() {
+/** The bracketed status without color. Kept separate from the painted string so the prompt's
+ *  width budget is measured against exactly what gets printed. */
+function statusBody() {
   const secs = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
   const el = t0
     ? `  ${secs < 60 ? secs + "s" : Math.floor(secs / 60) + "m" + (secs % 60) + "s"}`
     : "";
-  return `${statusWait ? C.warn : C.dim}[${statusLabel}${el}]${C.off}`;
+  return `[${statusLabel}${el}]`;
 }
 /** Clear the single-line prompt. Call before writing output (otherwise it overlaps).
  *  Stays on the current row (\r + clear-line) so readline's cursor tracking is not disturbed. */
@@ -158,6 +163,98 @@ function setStatus(label, { running = true, wait = false } = {}) {
     t0 = 0;
     clearInterval(ticker);
     ticker = null;
+  }
+  if (TTY && !streaming) prompt();
+}
+
+// ── Token usage (Ctx / 5h / 1w) ──────────────────────
+// Painted on the prompt line, right after the status, for the same reason the status itself is: the
+// prompt must stay a SINGLE physical line (see above), so a dedicated usage row above or below it
+// would reintroduce the cursor-row desync described there. With a pipe on the other end there is no
+// live prompt to repaint, so usage is simply not shown.
+//
+// Fetching usage makes the backend open a persistent connection (a child process), so this is never
+// polled: it is fetched once at startup and again each time a turn returns to idle — the same points
+// the WebUI refreshes at — and the 1-second status redraw just repaints the cached value.
+let usageCells = []; // [{ text, color }] in display order; pre-formatted, ready to paint
+// Thresholds at 50% / 80%, as in the WebUI. A boundary value belongs to the higher tier (50 → warn,
+// 80 → crit). "!" marks the top tier so the warning still reads on a colorless terminal.
+const USAGE_TIERS = [
+  { max: 50, color: C.dim, mark: "" },
+  { max: 80, color: C.warn, mark: "" },
+  { max: Infinity, color: C.err, mark: "!" },
+];
+/** One cell such as "Ctx:12%", colored by tier. An unavailable window yields no cell at all: on a
+ *  prompt line, columns are scarce enough that a placeholder "—" is not worth one. */
+function usageCell(name, value) {
+  if (!Number.isFinite(value)) return null;
+  const tier =
+    USAGE_TIERS.find((l) => value < l.max) ??
+    USAGE_TIERS[USAGE_TIERS.length - 1];
+  return {
+    text: `${name}:${Math.round(value)}%${tier.mark}`,
+    color: tier.color,
+  };
+}
+/** Compact token count: 512, 3.4k, 12k, 128k (same shape as the WebUI's). */
+function fmtTokens(n) {
+  if (!Number.isFinite(n)) return "?";
+  if (n < 1000) return String(n);
+  const k = n / 1000;
+  return (k < 10 ? k.toFixed(1) : Math.round(k)) + "k";
+}
+/** Turn an /api/usage payload into the cells to paint. */
+function setUsage(data) {
+  if (!data?.available) {
+    usageCells = [];
+    return;
+  }
+  const cells = [usageCell("Ctx", data.context?.utilization)];
+  // Local backends have no 5h/1w rate windows but do report real token counts, so that slot carries
+  // "Tok:used/max" instead — the WebUI switches on data.tokens the same way.
+  if (data.tokens) {
+    const { used, max } = data.tokens;
+    if (Number.isFinite(used) || Number.isFinite(max))
+      cells.push({
+        text: `Tok:${fmtTokens(used)}/${fmtTokens(max)}`,
+        color: C.dim,
+      });
+  } else {
+    cells.push(
+      usageCell("5h", data.fiveHour?.utilization),
+      usageCell("1w", data.sevenDay?.utilization),
+    );
+  }
+  usageCells = cells.filter(Boolean);
+}
+/** The usage segment, trimmed to fit `budget` visible columns. Cells are dropped from the right
+ *  (1w first) so Ctx — the one that moves every turn — is the last to go. "" when nothing fits. */
+function usageText(budget) {
+  for (let n = usageCells.length; n > 0; n--) {
+    const cells = usageCells.slice(0, n);
+    // +1 per cell for the space that separates it from whatever precedes it
+    const width = cells.reduce((w, c) => w + c.text.length + 1, 0);
+    if (width <= budget)
+      return cells.map((c) => ` ${c.color}${c.text}${C.off}`).join("");
+  }
+  return "";
+}
+let usageRequest = 0;
+/** Refresh the cached usage. Fire-and-forget: on failure the cells just disappear. */
+async function loadUsage() {
+  const request = ++usageRequest;
+  try {
+    // cwd is passed for the same reason the WebUI passes it: this call is what pins the backend
+    // child process's working directory, so without it a brand-new session would get cached at the
+    // server's launch directory instead of its own cwd.
+    const data = await api(
+      `/api/usage?sessionId=${encodeURIComponent(sessionId)}&provider=${encodeURIComponent(provider)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}`,
+    );
+    if (request !== usageRequest) return; // a newer fetch already landed; don't undo it
+    setUsage(data);
+  } catch {
+    if (request !== usageRequest) return;
+    usageCells = []; // no usage API, unreachable backend, … → show nothing rather than stale numbers
   }
   if (TTY && !streaming) prompt();
 }
@@ -196,12 +293,46 @@ const rl = createInterface({
 });
 let closed = false,
   awaiting = false;
-// On a terminal, redraw the single-line "[status] input" prompt every time. With a pipe on the other end, use a plain prompt as before.
+// Columns a string occupies on screen. Status labels are localized, and East Asian text renders two
+// columns per character, so counting characters would under-measure it and let the prompt wrap onto
+// a second physical line — the one thing the single-line prompt must never do. Only what the UI
+// strings can actually contain is listed (the wide / fullwidth blocks of the BMP); the ranges are
+// kept as numbers rather than a regex character class so they stay readable and reviewable.
+const WIDE_RANGES = [
+  [0x1100, 0x115f], // Hangul Jamo
+  [0x2e80, 0x303e], // CJK radicals / Kangxi / CJK symbols and punctuation
+  [0x3041, 0x33ff], // kana, Bopomofo, Hangul compatibility Jamo, CJK compatibility
+  [0x3400, 0x4dbf], // CJK unified ideographs extension A
+  [0x4e00, 0x9fff], // CJK unified ideographs
+  [0xa000, 0xa4cf], // Yi syllables
+  [0xac00, 0xd7a3], // Hangul syllables
+  [0xf900, 0xfaff], // CJK compatibility ideographs
+  [0xfe30, 0xfe6f], // CJK compatibility forms / small form variants
+  [0xff00, 0xff60], // fullwidth forms
+  [0xffe0, 0xffe6], // fullwidth signs
+];
+const dispWidth = (s) =>
+  [...s].reduce((w, ch) => {
+    const cp = ch.codePointAt(0);
+    return w + (WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1);
+  }, 0);
+// Columns left free for what is being typed. Usage cells are dropped before this margin is eaten
+// into, so adding them can never be what pushes the prompt into a second row.
+const INPUT_ROOM = 20;
+// On a terminal, redraw the single-line "[status] usage input" prompt every time. With a pipe on the other end, use a plain prompt as before.
 const prompt = () => {
   if (closed || !bootDone) return;
   endStreamLine(); // never paint the prompt onto an unfinished streamed line
   if (!TTY) return rl.prompt();
-  rl.setPrompt(`${statusText()} ${basePrompt}`);
+  const body = statusBody();
+  const budget =
+    (stdout.columns || 80) -
+    dispWidth(body) -
+    dispWidth(basePrompt) -
+    1 - // the space between the status/usage segment and basePrompt
+    INPUT_ROOM;
+  const status = `${statusWait ? C.warn : C.dim}${body}${C.off}`;
+  rl.setPrompt(`${status}${usageText(budget)} ${basePrompt}`);
   rl.prompt(true); // redraw while preserving the characters being typed
   shown = true;
 };
@@ -427,6 +558,7 @@ function handle(e) {
         awaiting = false;
         if (closed) exit(0);
         setStatus(t("state.waitingInput"), { running: false });
+        loadUsage(); // the turn is over: pick up the new context / plan usage
       }
       break;
     case "text_delta":
@@ -675,4 +807,7 @@ if (closed) {
 else {
   rl.resume();
   prompt();
+  // First paint of Ctx / 5h / 1w. Not awaited: this opens a backend child process, and the prompt
+  // must not wait on that — the cells appear on the next redraw once the numbers arrive.
+  loadUsage();
 }
