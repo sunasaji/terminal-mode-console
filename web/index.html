@@ -774,6 +774,25 @@
       body.compact.sess .bargrip {
         display: flex;
       }
+      /* An open bar shows itself, so the grip that claims a whole row above it is
+     19px of a 320px screen spent on nothing. Take the row back while the header
+     is open — but NOT while it is pinned, where the grip is the only way back:
+     a pinned bar does not close when the pointer leaves or focus moves on.
+     Only the header needs this; the footer's grip rides inside the status row
+     and costs no height either way.
+     The cost is that a pointer cannot reach the pin any more (approaching the
+     edge opens the bar, which hides the grip before it can be clicked) — on a
+     pointer-driven display proximity already does the pin's job. A screen with
+     no pointer, which is who the pin is for, has no :hover and no pointermove
+     to set .topNear, so its grip stays put and still toggles. */
+      body.compact.sess > header:hover > .bargrip,
+      body.compact.sess > header:focus-within > .bargrip,
+      body.compact.sess.topNear > header > .bargrip {
+        display: none;
+      }
+      body.compact.sess.topPin > header > .bargrip {
+        display: flex;
+      }
       /* A collapsed bar has to clip what does not fit, not squeeze it: left to
      shrink, the bottom-aligned button column would slide up into the strip. */
       body.compact.sess > footer > .footcols {

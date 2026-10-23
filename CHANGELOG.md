@@ -14,6 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   screen edge, when it is hovered, or when focus moves inside it; tapping a grip
   pins that bar open for touch screens. The collapsed bars occupy body's
   padding, so opening one overlays the log rather than reflowing it. The
+  header's grip claims a whole row, so it gives that row back once the header
+  is open — the open bar shows itself — except while pinned, where the grip is
+  the only way back to collapsed. The
   threshold can be overridden from the URL — `?compact=1` / `?compact=0` to
   force it on or off, `?compact=<px>` to move it. In compact mode the status
   row's elapsed-seconds counter also ticks every 10s instead of every second:
