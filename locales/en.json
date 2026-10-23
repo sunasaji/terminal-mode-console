@@ -19,6 +19,8 @@
   "backend.requested": "provider={provider} (requested: {requested})",
   "backend.unreachable": "Cannot connect",
   "backend.unreachableHint": "No response from the backend. Check LLM_BASE_URL and whether the backend is running.",
+  "compact.pinBottom": "Keep the bottom bar open (tap again to collapse it)",
+  "compact.pinTop": "Keep the top bar open (tap again to collapse it)",
   "cwd.placeholder": "Filter by cwd / cwd for new session",
   "cwd.title": "Shows only sessions whose working directory contains this text. This path is also used as the working directory for a new session (the server default is used when empty).",
   "error.missingToken": "The URL does not contain ?token=…. Open the pairing URL as provided.",
