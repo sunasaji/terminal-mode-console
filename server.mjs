@@ -4,7 +4,12 @@
 // Implements the HTTP API from docs/protocol.md. This layer is backend-agnostic.
 // To extend it, just add one file under agents/.
 //
-//   TMCON_TOKEN=<token> PORT=3456 node server.mjs
+//   TMCON_TOKEN=<token> TMCON_PORT=3456 node server.mjs
+//   node server.mjs --token <token> --port 3456 --host 127.0.0.1
+//
+// Settings resolve as: arguments > environment variables > config file > defaults.
+// The config file defaults to ~/.config/terminal-mode-console/env (override with
+// --config <path> or TMCON_CONFIG). See config.mjs.
 //
 // Pairing URL (turn it into a QR code):
 //   http://<host>:<PORT>?token=<token>&defaultProvider=<name>
@@ -17,6 +22,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
+import { parseArgs } from "node:util";
 import * as bus from "./bus.mjs";
 import {
   getAgent,
@@ -34,8 +40,43 @@ import {
   clearLastModel,
 } from "./session-metadata.mjs";
 import { makeT } from "./i18n.mjs";
+import { loadConfigIntoEnv, pkgVersion } from "./config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+// ── Configuration (arguments + env + config file) ───────────────────────────
+// Resolution order, highest precedence first:
+//   command-line arguments > environment variables > config file > defaults.
+// Parse args first so --version/--help can short-circuit, then merge the config
+// file into process.env (only keys not already set, so env wins over the file).
+let cliArgs;
+try {
+  cliArgs = parseArgs({
+    options: {
+      host: { type: "string" },
+      port: { type: "string" },
+      token: { type: "string" },
+      config: { type: "string" },
+      version: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: false,
+  }).values;
+} catch (e) {
+  console.error(e.message);
+  process.exit(2);
+}
+if (cliArgs.version) {
+  console.log(pkgVersion());
+  process.exit(0);
+}
+let loadedConfig;
+try {
+  loadedConfig = loadConfigIntoEnv({ argv: process.argv.slice(2) });
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}
 
 // ── Logging ───────────────────────────────────────────────
 // Prefix every line with a timestamp (local time). For long-lived connections
@@ -57,6 +98,10 @@ const maskToken = (s) => s.replace(/token=[^&]*/g, "token=***");
 // shared loader i18n.mjs (same files, same format as the WebUI and CLI).
 // The language is determined by the environment's locale.
 const { t } = makeT();
+if (cliArgs.help) {
+  console.log(t("server.usage"));
+  process.exit(0);
+}
 
 // Determine the client kind from the UA (glasses = Dart / WebUI = browser / CLI = node)
 const kindOf = (ua = "") =>
@@ -87,15 +132,17 @@ function appHealth() {
 // The `extra.expose` value reported by /api/info. Mirrors upstream
 // even-terminal 0.10.x, which advertises how the server is exposed to the
 // network (a tunnel provider, tailscale, or "off"). terminal-mode-console has
-// no built-in tunnel, but it honours the same environment variables so a client
-// that reads this field sees the same vocabulary. Defaults to "off".
+// no built-in tunnel, but it reports the same value vocabulary so a client that
+// reads this field behaves the same. The driving env vars are namespaced under
+// TMCON_ (TMCON_EXPOSE_PROVIDER / TMCON_HOST_MODE; renamed from upstream's
+// EVEN_TERMINAL_EXPOSE_PROVIDER / EVEN_HOST_MODE). Defaults to "off".
 function getExposeType() {
-  const expose = process.env.EVEN_TERMINAL_EXPOSE_PROVIDER;
+  const expose = process.env.TMCON_EXPOSE_PROVIDER;
   if (expose === "pinggy" || expose === "bore" || expose === "ngrok")
     return expose;
   if (expose) return "other";
-  if (process.env.EVEN_HOST_MODE === "tailscale") return "tailscale";
-  return process.env.EVEN_HOST_MODE ? "other" : "off";
+  if (process.env.TMCON_HOST_MODE === "tailscale") return "tailscale";
+  return process.env.TMCON_HOST_MODE ? "other" : "off";
 }
 
 // Log each state transition once (not on every poll)
@@ -111,15 +158,19 @@ setInterval(() => {
   }
 }, 10_000).unref?.();
 
-const PORT = parseInt(process.env.PORT ?? "3456", 10);
+const PORT = parseInt(
+  cliArgs.port ?? process.env.TMCON_PORT ?? process.env.PORT ?? "3456",
+  10,
+);
 // Bind address. Defaults to loopback only (secure-by-default). Because this
 // server grants arbitrary path traversal (/api/fs/dirs) and effectively RCE
 // (/api/prompt) behind a single token, by default it must not be reachable
 // directly from outside. Reachability should be handled by a fronting TLS proxy
 // (tailscale serve, etc.).
-// Only set HOST=0.0.0.0 explicitly when you want a direct LAN connection from
-// the glasses/phone.
-const HOST = process.env.HOST ?? "127.0.0.1";
+// Only set TMCON_HOST=0.0.0.0 explicitly when you want a direct LAN connection
+// from the glasses/phone. The legacy HOST is still accepted as a fallback.
+const HOST =
+  cliArgs.host ?? process.env.TMCON_HOST ?? process.env.HOST ?? "127.0.0.1";
 // Trust the X-Forwarded-For / Tailscale-User-* headers a fronting proxy adds,
 // so request logs show the real client instead of the loopback proxy. Only
 // honored when the TCP peer is loopback (tailscale serve forwards from there),
@@ -156,7 +207,7 @@ const SESSIONS_LIMIT_MAX = Number(process.env.SESSIONS_LIMIT_MAX) || Infinity;
 //   HISTORY_LIMIT_MAX      upper bound allowed for ?limit=. 0 or unset means "unlimited".
 const HISTORY_LIMIT_DEFAULT = Number(process.env.HISTORY_LIMIT_DEFAULT) || 100;
 const HISTORY_LIMIT_MAX = Number(process.env.HISTORY_LIMIT_MAX) || Infinity;
-const TOKEN = process.env.TMCON_TOKEN;
+const TOKEN = cliArgs.token ?? process.env.TMCON_TOKEN;
 if (!TOKEN) {
   console.error(t("server.needToken"));
   process.exit(1);
@@ -927,6 +978,8 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
+  if (loadedConfig?.loaded)
+    log(`config: ${loadedConfig.path} (${loadedConfig.applied.length} keys)`);
   log(
     `terminal-mode-console listening ${HOST}:${PORT}  slots=[claude→${slotBindings.claude}, codex→${slotBindings.codex}]  backends=[${agentNames().join(", ")}]  cwd=${process.cwd()}`,
   );

@@ -7,7 +7,11 @@
 //   tmcon-cli 'http://host:3462?token=XXXX'      # the pairing URL as-is
 //   tmcon-cli --url http://host:3462 --token XXXX [--session <id>] [--new] [--provider claude|codex] [--model <name>]
 //
-// Specify the model with --model (or EVEN_MODEL); switch mid-conversation with /model <name>,
+// Settings resolve as: arguments > environment variables (TMCON_URL, TMCON_TOKEN,
+// TMCON_PROVIDER, TMCON_MODEL) > config file > defaults. The config file defaults
+// to ~/.config/terminal-mode-console/env (override with --config <path> or TMCON_CONFIG).
+//
+// Specify the model with --model (or TMCON_MODEL); switch mid-conversation with /model <name>,
 // and /model on its own returns to "auto" (clears the memory and defers to the server-side default).
 // If unspecified, no model is sent and the session/server-side setting is carried over as-is.
 //
@@ -19,6 +23,16 @@
 import { createInterface } from "node:readline";
 import { stdin, stdout, argv, exit, env } from "node:process";
 import { makeT } from "../i18n.mjs";
+import { loadConfigIntoEnv, pkgVersion } from "../config.mjs";
+
+// Merge the config file (default ~/.config/terminal-mode-console/env) into env
+// before anything reads it. Real env vars win over the file; CLI args win over both.
+try {
+  loadConfigIntoEnv({ argv: argv.slice(2) });
+} catch (e) {
+  stdout.write(String(e.message) + "\n");
+  exit(1);
+}
 
 // ── Language (choosing what to display) ──────────────────────────────
 // The wording is externalized to locales/<lang>.json and looked up via the shared loader i18n.mjs
@@ -27,16 +41,16 @@ const { t } = makeT();
 
 // ── Arguments ──────────────────────────────────────────────
 const args = argv.slice(2);
-let url = env.EVEN_URL || "",
-  token = env.EVEN_TOKEN || "",
+let url = env.TMCON_URL || "",
+  token = env.TMCON_TOKEN || "",
   sessionId = null,
   wantNew = false;
-let provider = env.EVEN_PROVIDER || "claude";
+let provider = env.TMCON_PROVIDER || "claude";
 let cwd = null; // an existing session inherits that session's working directory
 let cwdArg = null; // --cwd: filters the listing + working directory for a new session
 // --model: the model used for each turn (a claude alias opus/sonnet/haiku/fable/default, or
 // a full ID). If omitted, defer to the server-side memory/default. Switchable mid-conversation with /model <name>.
-let model = env.EVEN_MODEL || null;
+let model = env.TMCON_MODEL || null;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--url") url = args[++i];
@@ -45,8 +59,13 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "--provider") provider = args[++i];
   else if (a === "--model") model = args[++i];
   else if (a === "--cwd") cwdArg = args[++i];
+  else if (a === "--config")
+    i++; // already consumed by loadConfigIntoEnv; skip its value
   else if (a === "--new") wantNew = true;
-  else if (a === "-h" || a === "--help") {
+  else if (a === "--version") {
+    stdout.write(pkgVersion() + "\n");
+    exit(0);
+  } else if (a === "-h" || a === "--help") {
     usage();
     exit(0);
   } else if (/^https?:\/\//.test(a)) {
