@@ -6,7 +6,11 @@
 // block rather than being swallowed by a truncated "update" notification.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runReader } from "../agents/claude.mjs";
+import {
+  runReader,
+  isForegroundResult,
+  buildUserMessage,
+} from "../agents/claude.mjs";
 
 // Minimal fake connection matching what runReader touches.
 function fakeConn(messages) {
@@ -164,4 +168,134 @@ test("a foreground result (no origin) still emits a turn-ending result", async (
     "foreground answer",
     "the foreground runTurn is resolved",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Foreground vs injected results are told apart by result.origin.kind, not by
+// whether an origin is present. The SDK forwards the triggering user message's
+// origin onto its result, and typed input must be stamped {kind:"human"}, so a
+// foreground result normally DOES carry an origin.
+
+test("isForegroundResult: our turns (human, or unattributed) are foreground", () => {
+  assert.equal(isForegroundResult({ type: "result" }), true, "no origin");
+  assert.equal(
+    isForegroundResult({ type: "result", origin: { kind: "human" } }),
+    true,
+    "a typed turn stamped human",
+  );
+  assert.equal(
+    isForegroundResult({ type: "result", origin: {} }),
+    true,
+    "an origin without a kind ties to foreground (never hang the bus)",
+  );
+});
+
+test("isForegroundResult: every injected kind is not foreground", () => {
+  for (const origin of [
+    { kind: "task-notification" },
+    { kind: "task-notification", subkind: "scheduled-trigger" },
+    { kind: "peer", from: "other-session" },
+    { kind: "channel", server: "some-server" },
+    { kind: "some-kind-added-later" },
+  ]) {
+    assert.equal(
+      isForegroundResult({ type: "result", origin }),
+      false,
+      `origin.kind=${origin.kind} must not resolve a pending turn`,
+    );
+  }
+});
+
+test("a foreground result stamped {kind:'human'} resolves the pending turn", async () => {
+  // Regression: keying on the mere presence of origin would treat this as a
+  // background update, never resolve pendingFg, and leave the WebUI stuck on
+  // "Running..." forever.
+  const { conn, events } = fakeConn([
+    streamDelta("human answer"),
+    {
+      type: "result",
+      subtype: "success",
+      result: "human answer",
+      origin: { kind: "human" },
+    },
+  ]);
+  let resolved;
+  conn.pendingFg.push((v) => (resolved = v));
+  await runReader(conn);
+
+  assert.equal(resolved, "human answer", "the foreground runTurn is resolved");
+  assert.ok(
+    events.some((e) => e.type === "result" && e.success === true),
+    "a turn-ending result is emitted",
+  );
+});
+
+test("a peer/channel result does not resolve the user's pending turn", async () => {
+  for (const origin of [
+    { kind: "peer", from: "other-session" },
+    { kind: "channel", server: "some-server" },
+  ]) {
+    const { conn, events } = fakeConn([
+      { type: "result", subtype: "success", result: "injected", origin },
+    ]);
+    let resolved;
+    conn.pendingFg.push((v) => (resolved = v));
+    await runReader(conn);
+
+    // The reader's end releases leftovers with a CANCELLED sentinel, so the
+    // turn must not have been resolved with the injected answer itself.
+    assert.notEqual(resolved, "injected", `${origin.kind}: turn not answered`);
+    assert.ok(
+      !events.some((e) => e.type === "result"),
+      `${origin.kind}: no turn-ending result`,
+    );
+  }
+});
+
+test("a turn after a completed background cycle is answered on the same query", async () => {
+  // The query used to be marked stale here and recycled on the next turn (a
+  // second child process on the same session). It must now stay in use: the
+  // next foreground result arrives on this very reader and resolves the turn.
+  const { conn } = fakeConn([
+    bgChanged([{ description: "sub-agent" }]), // 0 -> 1
+    bgChanged([]), // 1 -> 0 : background cycle complete
+    {
+      type: "result",
+      subtype: "success",
+      result: "after background",
+      origin: { kind: "human" },
+    },
+  ]);
+  let resolved;
+  conn.pendingFg.push((v) => (resolved = v));
+  await runReader(conn);
+
+  assert.equal(resolved, "after background");
+  assert.equal(
+    conn.staleAfterBg,
+    undefined,
+    "the connection is not marked for recycling",
+  );
+});
+
+test("buildUserMessage stamps typed input as human", () => {
+  const m = buildUserMessage("hello");
+  assert.deepEqual(m.origin, { kind: "human" });
+  assert.equal(m.type, "user");
+  assert.equal(m.message.content, "hello");
+});
+
+test("buildUserMessage leaves our own auto-continuation unattributed", () => {
+  const m = buildUserMessage("continue", [], { human: false });
+  assert.equal(
+    "origin" in m,
+    false,
+    "a synthesized prompt must not pass isHuman() trust gates",
+  );
+});
+
+test("buildUserMessage keeps the human origin when images are attached", () => {
+  const m = buildUserMessage("look", ["data:image/png;base64,AAAA"]);
+  assert.deepEqual(m.origin, { kind: "human" });
+  assert.ok(Array.isArray(m.message.content), "content becomes a block array");
 });

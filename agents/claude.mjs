@@ -16,8 +16,8 @@
 // dropped: In Claude Code 2.1.2xx the Agent (sub-agent) tool became background
 // execution by default. The main turn just launches the sub-agent and returns a
 // result immediately; completion arrives later as a follow-up message triggered
-// by a task-notification (a result carrying an origin) flowing into the same
-// query. With per-turn, the result would close the query — and thus the child
+// by a task-notification (a result whose origin.kind is "task-notification")
+// flowing into the same query. With per-turn, the result would close the query — and thus the child
 // process — killing any running background agent along with it. With a
 // persistent query the child process stays alive so agents don't die, and the
 // main turn's result can still return runTurn and bring the bus back to idle, so
@@ -25,10 +25,20 @@
 // is in progress (in 2.1.2xx the old "freezes on the second turn" issue is also
 // resolved).
 //
-// Foreground (user turn) completion and background-triggered completion are
-// distinguished by result.origin (user turn = no origin / background =
-// origin.kind==="task-notification"). This prevents mistakenly treating a later,
-// separate turn as an early completion.
+// Foreground (user turn) completion and injected completion are distinguished
+// by result.origin, which the SDK forwards from the user message that triggered
+// the turn. Every user-typed message is stamped origin {kind:"human"} — required,
+// since Claude Code treats a message without an origin as unattributed and fails
+// it closed at its isHuman() trust gates — so a foreground result carries kind
+// "human". Our own hidden auto-continuation is not human input, so it is sent
+// unattributed (no origin), and its result is still ours. Every other kind
+// (task-notification, peer, channel, and any added later) was injected and must
+// not resolve a pending turn. See isForegroundResult(). This prevents mistakenly
+// treating a later, separate turn as an early completion.
+//
+// Do NOT key this on the mere presence of origin. An earlier version did, which
+// only worked because typed messages were sent without an origin; stamping
+// {kind:"human"} as the SDK requires would then have hung every turn.
 //
 // [Model selection] Switchable per turn. The effective model is resolved in this
 // order:
@@ -242,8 +252,15 @@ function toImageBlock(img) {
 
 /** Build one turn's user message to push into the input channel. If there are no
  *  images, content is a string; if there are, it becomes a [text, ...image]
- *  array (Vision input can only be placed in the content array). */
-function buildUserMessage(text, images) {
+ *  array (Vision input can only be placed in the content array).
+ *
+ *  `human` stamps origin {kind:"human"}. The SDK requires it for keyboard input:
+ *  a message without an origin is unattributed and fails closed at Claude Code's
+ *  isHuman() trust gates (e.g. a prompt keyword that must be human-typed is then
+ *  ignored). Pass human:false for text we synthesize ourselves — the hidden
+ *  auto-continuation after background work is not human input, and stamping it
+ *  human would let a machine-written prompt through those same gates. */
+export function buildUserMessage(text, images, { human = true } = {}) {
   const blocks = (Array.isArray(images) ? images : [])
     .map(toImageBlock)
     .filter(Boolean);
@@ -254,7 +271,24 @@ function buildUserMessage(text, images) {
     type: "user",
     parent_tool_use_id: null,
     message: { role: "user", content },
+    ...(human ? { origin: { kind: "human" } } : {}),
   };
+}
+
+/** Whether a result answers a turn we sent (foreground) rather than one the
+ *  harness injected. The SDK forwards the triggering user message's origin onto
+ *  the result, so: our typed turns carry {kind:"human"}; our auto-continuation,
+ *  and results emitted before any user turn (e.g. a startup error), carry none.
+ *  Every other kind — task-notification (finished background work, a fired
+ *  scheduled task), peer, channel, and any kind added later — was injected and
+ *  must not resolve a pending runTurn.
+ *
+ *  An origin without a kind is treated as foreground. Wrongly resolving a turn
+ *  only returns the bus to idle a little early; wrongly NOT resolving one leaves
+ *  the WebUI stuck on "Running..." forever, so the tie goes to foreground. */
+export function isForegroundResult(msg) {
+  const kind = msg?.origin?.kind;
+  return kind === undefined || kind === "human";
 }
 
 /** Make a short label that fits on a single line of the glasses. The screen is small, so brevity is king. */
@@ -366,7 +400,7 @@ function makeInput() {
 
 /** The single loop that handles all messages from that query. On a foreground
  *  result it returns the corresponding runTurn, and it keeps streaming
- *  background (origin-carrying) follow-ups to the SSE. */
+ *  injected follow-ups (e.g. origin.kind "task-notification") to the SSE. */
 export async function runReader(conn) {
   const { session } = conn;
   const emit = (e) => {
@@ -433,17 +467,19 @@ export async function runReader(conn) {
               );
             } else if (prev > 0 && tasks.length === 0) {
               notify(t("notify.bg.doneTitle"), t("notify.bg.doneMessage"));
-              // A background (Task sub-agent) lifecycle has completed on this
-              // persistent query. Empirically the SDK then stops producing a
-              // foreground result for the *next* streaming-input user message,
-              // so runTurn's await would hang ("Running..." forever). Mark the
-              // connection so the next turn recycles the query (close + reopen
-              // with resume, preserving context) instead of reusing this one.
-              conn.staleAfterBg = true;
-              dbgTurn(
-                session,
-                "staleAfterBg=true (recycle query before next turn)",
-              );
+              // The query is deliberately NOT recycled here. Up to SDK 0.3.283,
+              // query() could close the CLI's stdin before a follow-up turn woken
+              // by a finished background agent, so the next turn never got a
+              // result ("Running..." forever). We used to work around that by
+              // closing and re-opening the query with `resume` on the next turn.
+              // SDK 0.3.284 fixed it (package.json now requires ^0.3.312), and the
+              // workaround did real harm: the replaced child was observed to
+              // outlive its close(), still holding the same session and acting on
+              // its own background notifications — two processes on one
+              // conversation — and resuming a session with unfinished background
+              // work could start a model turn on its own (fixed in CLI 2.1.280).
+              // Keep one query, and one child, per session.
+              //
               // Auto-continue: enqueue a hidden turn so the main agent reviews the
               // completed background results and gives its final answer. Skip while
               // a foreground turn is active (the user is interacting and the results
@@ -546,8 +582,9 @@ export async function runReader(conn) {
           conn.acc = "";
           if (!success)
             emit({ type: "error", message: `claude: ${msg.subtype}` });
-          // If there is an origin, this is triggered by a task-notification (=a
-          // background sub-turn). The app is already idle, so we don't emit a
+          // If this result was not triggered by a turn we sent (see
+          // isForegroundResult: e.g. origin.kind "task-notification" = a
+          // background sub-turn), the app is already idle, so we don't emit a
           // turn-ending result. When the SDK streamed the body (text_delta) it is
           // already on screen, so we only add a quiet "update" marker. But the SDK
           // does NOT always stream a background sub-turn — often it delivers only the
@@ -558,10 +595,10 @@ export async function runReader(conn) {
           // continuation is not lost. Overall completion is still announced on the
           // background_tasks_changed→[] side; other agents may still be running, so
           // this is an "update", not "complete".
-          if (msg.origin) {
+          if (!isForegroundResult(msg)) {
             dbgTurn(
               session,
-              `result: origin present → NOT resolving foreground (pendingFg=${conn.pendingFg.length} stays; bus will NOT go idle if this was actually the foreground turn)`,
+              `result: injected (origin.kind=${msg.origin?.kind}) → NOT resolving foreground (pendingFg=${conn.pendingFg.length} stays)`,
             );
             if (!wasStreaming && answer) {
               status("text_start");
@@ -646,36 +683,10 @@ export async function runReader(conn) {
  *  Query.setModel(). */
 async function getConn(session, model) {
   const existing = conns.get(session.id);
-  if (existing && !existing.closed) {
-    // Normally reuse the live persistent query. But if a completed background
-    // (Task sub-agent) cycle left it in a state where the SDK no longer emits a
-    // foreground result for the next streaming-input message (see staleAfterBg),
-    // recycle it: close it and fall through to reopen with resume, which keeps
-    // the conversation context. Only safe when nothing is in flight (no pending
-    // foreground turn and no active background).
-    if (
-      existing.staleAfterBg &&
-      existing.bgCount === 0 &&
-      existing.pendingFg.length === 0
-    ) {
-      dbgTurn(session, "getConn: recycling stale-after-background query");
-      existing.closed = true;
-      if (conns.get(session.id) === existing) conns.delete(session.id);
-      try {
-        existing.input.close();
-      } catch {
-        /* swallow */
-      }
-      try {
-        existing.q?.close?.();
-      } catch {
-        /* swallow */
-      }
-      // fall through to open a fresh query below (resume restores context)
-    } else {
-      return existing;
-    }
-  }
+  // Always reuse the live persistent query. It is never recycled after a
+  // background cycle (see the background_tasks_changed handler for why): a new
+  // query here would mean a second child process on the same conversation.
+  if (existing && !existing.closed) return existing;
   const initialModel = model || MODEL || undefined;
 
   const known = await findOnDisk(session.id);
@@ -705,7 +716,6 @@ async function getConn(session, model) {
     st: { streaming: false, thinkIdx: undefined, tools: new Map() },
     acc: "", // the current turn's response text (for saving to history)
     bgCount: 0, // number of active background tasks
-    staleAfterBg: false, // set once a background cycle completes; triggers a query recycle on the next turn
     lastActivity: Date.now(),
     closed: false,
     currentModel: initialModel ?? null, // the model currently in effect for this query (for setModel diff detection)
@@ -928,7 +938,8 @@ export default {
     conn.emit = emit; // use the latest turn's trackedEmit (tied to the bus's silence watcher)
     conn.ask = ask; // route the permission/question round-trip to the latest turn's too
     conn.enqueueFollowup = enqueueFollowup; // so the reader can auto-continue after background work
-    // Track chained auto-continuations on the session (survives query recycles).
+    // Track chained auto-continuations on the session (survives a query being
+    // re-opened after idle GC or an interrupt).
     // A real user turn resets it; a followup turn increments it (see MAX_BG_FOLLOWUP).
     session.bgFollowupChain = followup ? (session.bgFollowupChain ?? 0) + 1 : 0;
     // Swap the existing query's model only when the specification changed.
@@ -957,7 +968,9 @@ export default {
       session,
       `runTurn: enqueued user message (pendingFg=${conn.pendingFg.length}, bgCount=${conn.bgCount}) — awaiting foreground result`,
     );
-    conn.input.push(buildUserMessage(text, images));
+    // A followup is our own hidden auto-continuation, not human input: send it
+    // unattributed rather than stamped human (see buildUserMessage).
+    conn.input.push(buildUserMessage(text, images, { human: !followup }));
     await done; // resolved by a foreground result (also resolved via CANCELLED on disconnect/interrupt)
     dbgTurn(
       session,

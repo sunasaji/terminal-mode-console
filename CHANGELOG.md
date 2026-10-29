@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Raised the optional `@anthropic-ai/claude-agent-sdk` to `^0.3.312` (was
+  `^0.3.252`, which installs had resolved to 0.3.278). SDK 0.3.284 fixed
+  `query()` closing the CLI's stdin before a follow-up turn woken by a finished
+  background agent — the bug behind the 0.3.0 query-recycle workaround, which
+  is now removed (see Fixed). The bump also clears three `npm audit`
+  advisories (`@modelcontextprotocol/sdk`, `hono`, `zod`; 8 → 5 in total).
+
+### Fixed
+
+- Claude backend: the query is no longer closed and reopened with `resume`
+  after a background (Task sub-agent) cycle. That workaround (0.3.0) left the
+  replaced child running: it outlived `close()`, still held the same session,
+  and kept acting on its own background notifications, so one conversation
+  could end up with several `claude` processes, each able to edit files. Each
+  session again keeps exactly one query and one child process.
+- Claude backend: typed user turns are now stamped `origin: {kind: "human"}`,
+  as the SDK requires. Without it Claude Code treats the input as unattributed
+  and fails it closed at its `isHuman()` trust gates. The hidden
+  auto-continuation is deliberately left unattributed, since it is not human
+  input.
+- Claude backend: a result is now matched to the user's turn by `origin.kind`
+  (`human`, or no origin) rather than by whether it carries an `origin` at all.
+  The SDK forwards the triggering message's origin onto its result, so with the
+  stamp above the old check would have taken every foreground answer for a
+  background update and left the turn stuck on "Running...".
+  `task-notification`, `peer` and `channel` results still never resolve a
+  pending turn.
+
 ### Security
 
 - Pinned `markdown-it` to 14.3.3 (via the existing `markdownlint-cli`
