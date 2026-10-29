@@ -1754,6 +1754,19 @@
             }
             renderMarkdown(line("assistant", ""), m.text); // Turn past assistant utterances into Markdown too
           }
+          // On (re)connect the SSE re-emits pending question/permission requests right away, usually
+          // before this history fetch resolves. The live card then lands in the still-empty log and the
+          // history is appended below it, pushing it off-screen (or a replace wipes it). Move any
+          // unsettled live card back to the end of the log so it stays visible and answerable.
+          // appendChild moves an existing node, so in-progress input/selection is preserved.
+          let movedCard = false;
+          for (const st of [activePermission, activeQuestion]) {
+            if (st && !st._done && st.card) {
+              log.appendChild(st.card);
+              movedCard = true;
+            }
+          }
+          if (movedCard) autoScroll();
           if (readOnly && (body.replace || !readOnlyCursor))
             line("dim", t("history.readOnly"));
         } catch {
