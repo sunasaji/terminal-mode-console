@@ -53,6 +53,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The three remaining advisories live inside the optional Claude SDK's own
   peer tree (`@modelcontextprotocol/sdk` → `hono`, `ip-address`) and need an
   upstream SDK release; see [docs/maintaining.md](docs/maintaining.md).
+- Cleared the last five `npm audit` advisories (one high) in the lock alone:
+  `body-parser` 2.4.0, `qs` 6.17.1, `@hono/node-server` 2.1.5, `ip-address`
+  10.7.5 and `fast-uri` 3.1.9, all inside the optional Claude SDK's
+  `@modelcontextprotocol/sdk` peer tree and all within the ranges it already
+  declares, so no upstream release was needed after all. `package.json` is
+  unchanged and nothing published moves; `npm audit` now reports 0.
 
 ## [0.4.0] - 2026-10-23
 
