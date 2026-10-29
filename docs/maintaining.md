@@ -55,6 +55,21 @@ package, add the `overrides` entry and edit that one lock entry by hand
 (`version`, `resolved`, `integrity` from `npm view <pkg>@<ver> dist.integrity`),
 then verify with `npm ci --dry-run` and a clean `npm ci`.
 
+Raising the Claude SDK itself changes too many entries to edit by hand.
+Regenerate the lock with a different npm instead, which keeps the peer tree:
+`npx -y npm@10 install --package-lock-only --ignore-scripts` (npm 10 is what
+Node 20/22 in CI ships; npm 12 also works). Then check that
+`node_modules/@modelcontextprotocol/sdk` is in the lock and that a clean
+`npm ci` with the local npm passes. Raising to `^0.3.312` was done this way.
+
+The same applies to `npm audit fix`, which runs an install too. Advisories in
+the Claude SDK's peer tree can often be cleared without an upstream release,
+because the fixed versions fall inside the ranges the peers already declare:
+run `npx -y npm@10 audit fix --package-lock-only --ignore-scripts` in a
+scratch copy of `package.json` and `package-lock.json`, confirm that
+`package.json` did not change and that the checks above pass, then copy the
+lock back.
+
 ## External pull requests
 
 Integrate them with a **merge commit** ("Create a merge commit" on GitHub),

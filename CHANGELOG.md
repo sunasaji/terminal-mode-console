@@ -6,6 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Raised the optional `@anthropic-ai/claude-agent-sdk` to `^0.3.312` (was
+  `^0.3.252`, which installs had resolved to 0.3.278). SDK 0.3.284 fixed
+  `query()` closing the CLI's stdin before a follow-up turn woken by a finished
+  background agent — the bug behind the 0.3.0 query-recycle workaround, which
+  is now removed (see Fixed). The bump also clears three `npm audit`
+  advisories (`@modelcontextprotocol/sdk`, `hono`, `zod`; 8 → 5 in total).
+
+### Fixed
+
+- Claude backend: the query is no longer closed and reopened with `resume`
+  after a background (Task sub-agent) cycle. That workaround (0.3.0) left the
+  replaced child running: it outlived `close()`, still held the same session,
+  and kept acting on its own background notifications, so one conversation
+  could end up with several `claude` processes, each able to edit files. Each
+  session again keeps exactly one query and one child process.
+- Claude backend: typed user turns are now stamped `origin: {kind: "human"}`,
+  as the SDK requires. Without it Claude Code treats the input as unattributed
+  and fails it closed at its `isHuman()` trust gates. The hidden
+  auto-continuation is deliberately left unattributed, since it is not human
+  input.
+- Claude backend: a result is now matched to the user's turn by `origin.kind`
+  (`human`, or no origin) rather than by whether it carries an `origin` at all.
+  The SDK forwards the triggering message's origin onto its result, so with the
+  stamp above the old check would have taken every foreground answer for a
+  background update and left the turn stuck on "Running...".
+  `task-notification`, `peer` and `channel` results still never resolve a
+  pending turn.
+- Claude backend: the idle GC no longer tears down a query while background
+  tasks are in flight. It assumed background work keeps SDK messages flowing,
+  but the SDK sends no heartbeat while a background agent waits on a tool that
+  prints nothing: a silent 120 s `sleep` left a 108 s gap with only two
+  `task_progress` messages. So a long build, sleep or Monitor running past
+  `CLAUDE_SESSION_IDLE_MS` (10 min) had its query closed and the background
+  agent killed mid-flight. The check is now `isIdleForGc()`, which skips any
+  query with a pending foreground turn or a non-zero background task count.
+
 ### Security
 
 - Pinned `markdown-it` to 14.3.3 (via the existing `markdownlint-cli`
@@ -15,6 +53,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The three remaining advisories live inside the optional Claude SDK's own
   peer tree (`@modelcontextprotocol/sdk` → `hono`, `ip-address`) and need an
   upstream SDK release; see [docs/maintaining.md](docs/maintaining.md).
+- Cleared the last five `npm audit` advisories (one high) in the lock alone:
+  `body-parser` 2.4.0, `qs` 6.17.1, `@hono/node-server` 2.1.5, `ip-address`
+  10.7.5 and `fast-uri` 3.1.9, all inside the optional Claude SDK's
+  `@modelcontextprotocol/sdk` peer tree and all within the ranges it already
+  declares, so no upstream release was needed after all. `package.json` is
+  unchanged and nothing published moves; `npm audit` now reports 0.
 
 ## [0.4.0] - 2026-10-23
 
