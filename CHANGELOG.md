@@ -35,6 +35,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   background update and left the turn stuck on "Running...".
   `task-notification`, `peer` and `channel` results still never resolve a
   pending turn.
+- Claude backend: the idle GC no longer tears down a query while background
+  tasks are in flight. It assumed background work keeps SDK messages flowing,
+  but the SDK sends no heartbeat while a background agent waits on a tool that
+  prints nothing: a silent 120 s `sleep` left a 108 s gap with only two
+  `task_progress` messages. So a long build, sleep or Monitor running past
+  `CLAUDE_SESSION_IDLE_MS` (10 min) had its query closed and the background
+  agent killed mid-flight. The check is now `isIdleForGc()`, which skips any
+  query with a pending foreground turn or a non-zero background task count.
 
 ### Security
 

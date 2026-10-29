@@ -152,9 +152,9 @@ const AUTO_ALLOW = new Set(
 );
 
 // A persistent query that has been idle for this long is torn down to free the
-// child process (default 10 minutes). While a background agent is running,
-// task_progress and the like keep flowing and lastActivity keeps being updated,
-// so anything in progress is not torn down. 0 disables GC.
+// child process (default 10 minutes). 0 disables GC. A query with background
+// work in flight is never torn down, however long it has been silent — see
+// isIdleForGc() for why lastActivity alone cannot tell that apart.
 const SESSION_IDLE_MS = parseInt(
   process.env.CLAUDE_SESSION_IDLE_MS ?? "600000",
   10,
@@ -746,13 +746,34 @@ async function getConn(session, model) {
   return conn;
 }
 
+/** Whether the idle GC may tear this persistent query down (and with it the
+ *  child process and everything running inside it).
+ *
+ *  Never while a foreground turn is awaiting its result, and never while
+ *  background tasks are in flight (bgCount, from background_tasks_changed).
+ *  The second check cannot be replaced by lastActivity: the SDK sends no
+ *  heartbeat while a background agent waits on a tool that prints nothing. A
+ *  background agent running a silent 120 s `sleep` was measured to leave a
+ *  108 s gap between SDK messages (only two task_progress in total), so a
+ *  long build, a long sleep or a Monitor waiting on a slow external job goes
+ *  quiet for longer than SESSION_IDLE_MS, and a lastActivity-only check would
+ *  kill that work mid-flight.
+ *
+ *  Erring this way is cheap: if bgCount were ever left stale above zero, the
+ *  cost is one idle child kept alive until the next background_tasks_changed;
+ *  erring the other way loses the user's in-progress work. */
+export function isIdleForGc(conn, now, idleMs) {
+  if (conn.pendingFg.length) return false;
+  if (conn.bgCount > 0) return false;
+  return now - conn.lastActivity >= idleMs;
+}
+
 /** Tear down unresponsive persistent queries to free their child processes. */
 if (SESSION_IDLE_MS > 0) {
   setInterval(() => {
     const now = Date.now();
     for (const conn of conns.values()) {
-      if (conn.pendingFg.length) continue; // don't touch ones awaiting a foreground response
-      if (now - conn.lastActivity < SESSION_IDLE_MS) continue;
+      if (!isIdleForGc(conn, now, SESSION_IDLE_MS)) continue;
       conn.closed = true;
       conns.delete(conn.session.id);
       try {

@@ -10,6 +10,7 @@ import {
   runReader,
   isForegroundResult,
   buildUserMessage,
+  isIdleForGc,
 } from "../agents/claude.mjs";
 
 // Minimal fake connection matching what runReader touches.
@@ -298,4 +299,36 @@ test("buildUserMessage keeps the human origin when images are attached", () => {
   const m = buildUserMessage("look", ["data:image/png;base64,AAAA"]);
   assert.deepEqual(m.origin, { kind: "human" });
   assert.ok(Array.isArray(m.message.content), "content becomes a block array");
+});
+
+// The idle GC tears down the query — and the child process with everything
+// running inside it — so it must never fire on a query that is still working.
+const IDLE = 600000;
+const gcConn = (over = {}) => ({
+  pendingFg: [],
+  bgCount: 0,
+  lastActivity: 0,
+  ...over,
+});
+
+test("idle GC closes a query that has been silent past the limit with nothing in flight", () => {
+  assert.equal(isIdleForGc(gcConn(), IDLE, IDLE), true);
+  assert.equal(
+    isIdleForGc(gcConn(), IDLE - 1, IDLE),
+    false,
+    "not yet idle long enough",
+  );
+});
+
+test("idle GC never closes a query whose background work has gone silent", () => {
+  // A background agent waiting on a tool that prints nothing (a long build, a
+  // long sleep, a Monitor on a slow job) produces no SDK messages, so
+  // lastActivity goes stale while the work is very much alive.
+  const conn = gcConn({ bgCount: 1, lastActivity: 0 });
+  assert.equal(isIdleForGc(conn, 10 * IDLE, IDLE), false);
+});
+
+test("idle GC never closes a query awaiting a foreground result", () => {
+  const conn = gcConn({ pendingFg: [() => {}], lastActivity: 0 });
+  assert.equal(isIdleForGc(conn, 10 * IDLE, IDLE), false);
 });
