@@ -188,6 +188,10 @@ This prevents the WebUI from momentarily returning to `Waiting input` after a fo
 and while running it keeps showing "Running in background" (when everything completes, the adapter emits
 `idle` and returns to `Waiting input`).
 
+The "all complete" step also sends a hidden auto-continuation turn so the agent reports the results. It can be folded
+into a turn Claude Code is already running for a task's notification, and is then answered by that turn's `result` rather
+than one of its own; the adapter matches results to turns by client uuid for this reason (see `docs/developer.md`).
+
 ### Event order within one turn
 
 ```text
