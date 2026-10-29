@@ -49,6 +49,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   log and the history was appended below it, pushing it off-screen. After the
   history renders, any unanswered card is moved back to the end of the log,
   keeping any input already typed.
+- Claude backend: a turn could stay on "Running…" forever, with every later
+  prompt stuck in the queue, after background agents finished. The hidden
+  auto-continuation is sent the moment the last background task completes,
+  which is when Claude Code starts its own turn for that task's notification;
+  it folds the continuation into that turn, so the continuation never gets a
+  result of its own and the one result there is says `origin.kind:
+"task-notification"`. Matched by origin alone, the continuation looked
+  unanswered (observed: "Running… 212m · no response 119m"). Every message
+  sent to Claude Code now carries a client `uuid`, and a result is matched to
+  our turns by finding that uuid in `user_message_uuids`, which lists every
+  message the turn consumed, folded ones included. One result can now answer
+  several sends; `origin.kind` stays as the fallback for results without
+  uuids.
 
 ### Security
 

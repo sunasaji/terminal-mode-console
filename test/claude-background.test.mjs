@@ -1,9 +1,11 @@
 // test/claude-background.test.mjs — background (Task sub-agent) follow-up rendering
 //
 // When a background agent completes, the SDK delivers the main agent's follow-up as
-// a result carrying an origin (a task-notification). That body is not always streamed
-// as text_delta first; when it isn't, it must still be rendered as a full assistant
-// block rather than being swallowed by a truncated "update" notification.
+// a result that none of our pending turns asked for (origin.kind "task-notification").
+// That body is not always streamed as text_delta first; when it isn't, it must still
+// be rendered as a full assistant block rather than being swallowed by a truncated
+// "update" notification. The same file covers how a result is matched to the turn it
+// answers: by client uuid first, by origin.kind as the fallback.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -11,6 +13,7 @@ import {
   isForegroundResult,
   buildUserMessage,
   isIdleForGc,
+  takeAnswered,
 } from "../agents/claude.mjs";
 
 // Minimal fake connection matching what runReader touches.
@@ -124,7 +127,7 @@ test("auto-continuation: enqueues a follow-up turn when background work finishes
 test("auto-continuation: does not fire while a foreground turn is still active", async () => {
   const calls = [];
   const { conn } = fakeConn([bgChanged([{}]), bgChanged([])]);
-  conn.pendingFg = [() => {}]; // a foreground turn is in flight
+  conn.pendingFg = [{ uuid: null, resolve() {} }]; // a foreground turn is in flight
   conn.enqueueFollowup = (text) => calls.push(text);
   await runReader(conn);
 
@@ -150,14 +153,14 @@ test("auto-continuation: honors the chained-followup cap", async () => {
   );
 });
 
-test("a foreground result (no origin) still emits a turn-ending result", async () => {
+test("without uuids, a result with no origin still answers the pending turn", async () => {
   const { conn, events } = fakeConn([
     streamDelta("foreground answer"),
     { type: "result", subtype: "success", result: "foreground answer" },
   ]);
   // A foreground turn resolves a pending runTurn; provide one so it can settle.
   let resolved;
-  conn.pendingFg.push((v) => (resolved = v));
+  conn.pendingFg.push({ uuid: null, resolve: (v) => (resolved = v) });
   await runReader(conn);
 
   assert.ok(
@@ -172,10 +175,11 @@ test("a foreground result (no origin) still emits a turn-ending result", async (
 });
 
 // ---------------------------------------------------------------------------
-// Foreground vs injected results are told apart by result.origin.kind, not by
-// whether an origin is present. The SDK forwards the triggering user message's
-// origin onto its result, and typed input must be stamped {kind:"human"}, so a
-// foreground result normally DOES carry an origin.
+// The origin.kind fallback, used for a result that carries no uuids. Foreground
+// vs injected results are told apart by result.origin.kind, not by whether an
+// origin is present. The SDK forwards the triggering user message's origin onto
+// its result, and typed input must be stamped {kind:"human"}, so a foreground
+// result normally DOES carry an origin.
 
 test("isForegroundResult: our turns (human, or unattributed) are foreground", () => {
   assert.equal(isForegroundResult({ type: "result" }), true, "no origin");
@@ -221,7 +225,7 @@ test("a foreground result stamped {kind:'human'} resolves the pending turn", asy
     },
   ]);
   let resolved;
-  conn.pendingFg.push((v) => (resolved = v));
+  conn.pendingFg.push({ uuid: null, resolve: (v) => (resolved = v) });
   await runReader(conn);
 
   assert.equal(resolved, "human answer", "the foreground runTurn is resolved");
@@ -240,7 +244,7 @@ test("a peer/channel result does not resolve the user's pending turn", async () 
       { type: "result", subtype: "success", result: "injected", origin },
     ]);
     let resolved;
-    conn.pendingFg.push((v) => (resolved = v));
+    conn.pendingFg.push({ uuid: null, resolve: (v) => (resolved = v) });
     await runReader(conn);
 
     // The reader's end releases leftovers with a CANCELLED sentinel, so the
@@ -268,7 +272,7 @@ test("a turn after a completed background cycle is answered on the same query", 
     },
   ]);
   let resolved;
-  conn.pendingFg.push((v) => (resolved = v));
+  conn.pendingFg.push({ uuid: null, resolve: (v) => (resolved = v) });
   await runReader(conn);
 
   assert.equal(resolved, "after background");
@@ -329,6 +333,100 @@ test("idle GC never closes a query whose background work has gone silent", () =>
 });
 
 test("idle GC never closes a query awaiting a foreground result", () => {
-  const conn = gcConn({ pendingFg: [() => {}], lastActivity: 0 });
+  const conn = gcConn({
+    pendingFg: [{ uuid: null, resolve() {} }],
+    lastActivity: 0,
+  });
   assert.equal(isIdleForGc(conn, 10 * IDLE, IDLE), false);
+});
+
+// Matching a result to our send by client uuid (result.user_message_uuids).
+// Claude Code folds a message that arrives while a turn is running into that
+// turn: the message never gets a result of its own, and the one result there
+// is carries the running turn's origin. Measured against the live backend: a
+// second send made during a tool call came back as a single result with
+// origin "human" and user_message_uuids [first, second].
+const U1 = "11111111-1111-4111-8111-111111111111";
+const U2 = "22222222-2222-4222-8222-222222222222";
+const pend = (conn, uuid) => {
+  const box = {};
+  conn.pendingFg.push({ uuid, resolve: (v) => (box.value = v) });
+  return box;
+};
+
+test("our auto-continuation folded into a task-notification turn is answered", async () => {
+  // The hang this fixes: the auto-continuation (sent unattributed) was folded
+  // into the turn Claude Code started for the finishing task's notification,
+  // so its only result said origin.kind "task-notification" and runTurn waited
+  // forever — "Running… 212m · no response 119m", next prompt stuck in queue.
+  const { conn, events } = fakeConn([
+    {
+      type: "result",
+      subtype: "success",
+      result: "final report",
+      origin: { kind: "task-notification" },
+      user_message_uuid: U1,
+      user_message_uuids: [U1],
+    },
+  ]);
+  const turn = pend(conn, U1);
+  await runReader(conn);
+
+  assert.equal(turn.value, "final report", "the folded send is answered");
+  assert.ok(
+    events.some((e) => e.type === "result" && e.success === true),
+    "the turn ends with a real result",
+  );
+});
+
+test("one result that answers two of our sends releases both", () => {
+  const conn = { pendingFg: [] };
+  const a = pend(conn, U1);
+  const b = pend(conn, U2);
+  const hit = takeAnswered(conn, {
+    type: "result",
+    origin: { kind: "human" },
+    user_message_uuid: U1,
+    user_message_uuids: [U1, U2],
+  });
+  assert.equal(hit.length, 2, "both sends are answered by the one result");
+  assert.equal(conn.pendingFg.length, 0, "nothing is left waiting");
+  for (const p of hit) p.resolve("x");
+  assert.equal(a.value, "x");
+  assert.equal(b.value, "x");
+});
+
+test("a result carrying only someone else's uuids resolves nothing", () => {
+  const conn = { pendingFg: [] };
+  pend(conn, U1);
+  const hit = takeAnswered(conn, {
+    type: "result",
+    origin: { kind: "human" },
+    user_message_uuids: [U2],
+  });
+  assert.equal(hit.length, 0, "not ours, even with origin human");
+  assert.equal(conn.pendingFg.length, 1, "our turn keeps waiting");
+});
+
+test("without uuids, a result falls back to origin.kind", () => {
+  const conn = { pendingFg: [] };
+  pend(conn, U1);
+  assert.equal(
+    takeAnswered(conn, {
+      type: "result",
+      origin: { kind: "task-notification" },
+    }).length,
+    0,
+    "an injected kind does not resolve",
+  );
+  assert.equal(
+    takeAnswered(conn, { type: "result", origin: { kind: "human" } }).length,
+    1,
+    "human resolves the oldest pending turn",
+  );
+});
+
+test("buildUserMessage carries the client uuid when given", () => {
+  assert.equal(buildUserMessage("hi", [], { uuid: U1 }).uuid, U1);
+  assert.equal("uuid" in buildUserMessage("hi"), false, "omitted when absent");
 });

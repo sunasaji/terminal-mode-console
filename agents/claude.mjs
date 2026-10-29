@@ -17,28 +17,48 @@
 // execution by default. The main turn just launches the sub-agent and returns a
 // result immediately; completion arrives later as a follow-up message triggered
 // by a task-notification (a result whose origin.kind is "task-notification")
-// flowing into the same query. With per-turn, the result would close the query — and thus the child
-// process — killing any running background agent along with it. With a
-// persistent query the child process stays alive so agents don't die, and the
-// main turn's result can still return runTurn and bring the bus back to idle, so
-// you can keep talking to the foreground agent even while background execution
-// is in progress (in 2.1.2xx the old "freezes on the second turn" issue is also
-// resolved).
+// flowing into the same query. With per-turn, the result would close the query
+// — and thus the child process — killing any running background agent along
+// with it. With a persistent query the child process stays alive so agents
+// don't die, and the main turn's result can still return runTurn and bring the
+// bus back to idle, so you can keep talking to the foreground agent even while
+// background execution is in progress (in 2.1.2xx the old "freezes on the
+// second turn" issue is also resolved).
 //
-// Foreground (user turn) completion and injected completion are distinguished
-// by result.origin, which the SDK forwards from the user message that triggered
-// the turn. Every user-typed message is stamped origin {kind:"human"} — required,
-// since Claude Code treats a message without an origin as unattributed and fails
-// it closed at its isHuman() trust gates — so a foreground result carries kind
-// "human". Our own hidden auto-continuation is not human input, so it is sent
-// unattributed (no origin), and its result is still ours. Every other kind
-// (task-notification, peer, channel, and any added later) was injected and must
-// not resolve a pending turn. See isForegroundResult(). This prevents mistakenly
-// treating a later, separate turn as an early completion.
+// The query is never re-opened while the session lives (apart from the idle GC
+// and an interrupt). An earlier version recycled it after every background
+// cycle, which left a second child process on the same conversation; see the
+// background_tasks_changed handler.
 //
-// Do NOT key this on the mere presence of origin. An earlier version did, which
-// only worked because typed messages were sent without an origin; stamping
-// {kind:"human"} as the SDK requires would then have hung every turn.
+// [Matching a result to the turn it answers] A result answers one of our
+// pending turns (conn.pendingFg) if either of these holds, checked in this
+// order by takeAnswered():
+//
+//   1. Client uuid. Every message we send carries a uuid, and the SDK lists in
+//      result.user_message_uuids every user message the turn consumed. That
+//      includes a message Claude Code folded into a turn that was already
+//      running, and it is the only reliable signal: our auto-continuation is
+//      sent the moment the last background task finishes, which is exactly when
+//      Claude Code starts a turn of its own for that task's notification. The
+//      continuation is then answered inside the notification's turn, never gets
+//      a result of its own, and the one result there is carries origin.kind
+//      "task-notification" — so judged by origin it looked unanswered and
+//      runTurn waited forever (observed: "Running… 212m · no response 119m",
+//      with the next prompt stuck in the queue). One result can answer several
+//      sends.
+//   2. origin.kind, only for a result without uuids (an older producer). The SDK
+//      forwards the triggering message's origin onto its result. Every
+//      user-typed message is stamped origin {kind:"human"} — required, since
+//      Claude Code treats a message without an origin as unattributed and fails
+//      it closed at its isHuman() trust gates — so a foreground result carries
+//      kind "human". Our own hidden auto-continuation is not human input, so it
+//      is sent unattributed (no origin). Every other kind (task-notification,
+//      peer, channel, and any added later) was injected and must not resolve a
+//      pending turn. See isForegroundResult().
+//
+// Do NOT key the fallback on the mere presence of origin. An earlier version
+// did, which only worked because typed messages were sent without an origin;
+// stamping {kind:"human"} as the SDK requires would then have hung every turn.
 //
 // [Model selection] Switchable per turn. The effective model is resolved in this
 // order:
@@ -71,6 +91,7 @@
 //   CLAUDE_BG_AUTO_CONTINUE_MAX  cap on chained auto-continuations (default 5;
 //                           reset by any user turn) to avoid runaway loops
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { makeT } from "../i18n.mjs";
 
@@ -259,8 +280,11 @@ function toImageBlock(img) {
  *  isHuman() trust gates (e.g. a prompt keyword that must be human-typed is then
  *  ignored). Pass human:false for text we synthesize ourselves — the hidden
  *  auto-continuation after background work is not human input, and stamping it
- *  human would let a machine-written prompt through those same gates. */
-export function buildUserMessage(text, images, { human = true } = {}) {
+ *  human would let a machine-written prompt through those same gates.
+ *
+ *  `uuid` is the client uuid Claude Code echoes back in result.user_message_uuids
+ *  for every turn that consumed this message (see takeAnswered). */
+export function buildUserMessage(text, images, { human = true, uuid } = {}) {
   const blocks = (Array.isArray(images) ? images : [])
     .map(toImageBlock)
     .filter(Boolean);
@@ -272,6 +296,7 @@ export function buildUserMessage(text, images, { human = true } = {}) {
     parent_tool_use_id: null,
     message: { role: "user", content },
     ...(human ? { origin: { kind: "human" } } : {}),
+    ...(uuid ? { uuid } : {}),
   };
 }
 
@@ -289,6 +314,46 @@ export function buildUserMessage(text, images, { human = true } = {}) {
 export function isForegroundResult(msg) {
   const kind = msg?.origin?.kind;
   return kind === undefined || kind === "human";
+}
+
+/** Remove from conn.pendingFg, and return (oldest first), the foreground turns
+ *  that this result answers. An empty array means the result is not ours.
+ *
+ *  Matched by client uuid when the result carries them: user_message_uuids
+ *  lists every user message the turn consumed — a batch Claude Code merged into
+ *  one turn, and any message it folded into a turn already running — so each of
+ *  our sends found there is answered, whatever the result's origin says. One
+ *  result can therefore answer several sends, which a one-result-one-turn
+ *  shift() could never release.
+ *
+ *  A result that carries uuids but none of ours answers someone else's message
+ *  and resolves nothing. Without uuids — an older producer, or a result no
+ *  client message triggered (a task notification's own turn, a startup error)
+ *  — fall back to origin.kind via isForegroundResult and the oldest pending turn. */
+export function takeAnswered(conn, msg) {
+  const ids = Array.isArray(msg?.user_message_uuids)
+    ? msg.user_message_uuids
+    : msg?.user_message_uuid
+      ? [msg.user_message_uuid]
+      : [];
+  if (ids.length) {
+    const answered = [];
+    for (let i = 0; i < conn.pendingFg.length;) {
+      const p = conn.pendingFg[i];
+      if (p.uuid && ids.includes(p.uuid))
+        answered.push(...conn.pendingFg.splice(i, 1));
+      else i++;
+    }
+    return answered;
+  }
+  if (isForegroundResult(msg) && conn.pendingFg.length)
+    return [conn.pendingFg.shift()];
+  return [];
+}
+
+/** Settle every pending foreground turn with `value` (CANCELLED on teardown). */
+function releasePending(conn, value) {
+  while (conn.pendingFg.length) conn.pendingFg.shift().resolve(value);
 }
 
 /** Make a short label that fits on a single line of the glasses. The screen is small, so brevity is king. */
@@ -398,9 +463,10 @@ function makeInput() {
   };
 }
 
-/** The single loop that handles all messages from that query. On a foreground
- *  result it returns the corresponding runTurn, and it keeps streaming
- *  injected follow-ups (e.g. origin.kind "task-notification") to the SSE. */
+/** The single loop that handles all messages from that query. A result that
+ *  answers one of our pending turns (see takeAnswered) returns the
+ *  corresponding runTurn(s); any other result is an injected follow-up (e.g.
+ *  origin.kind "task-notification") and is only streamed to the SSE. */
 export async function runReader(conn) {
   const { session } = conn;
   const emit = (e) => {
@@ -564,6 +630,7 @@ export async function runReader(conn) {
             session,
             `result subtype=${msg.subtype}`,
             `origin=${msg.origin ? (msg.origin.kind ?? "yes") : "none"}`,
+            `uuids=${(msg.user_message_uuids ?? []).length}`,
             `pendingFg=${conn.pendingFg.length}`,
             `bgCount=${conn.bgCount}`,
           );
@@ -582,9 +649,11 @@ export async function runReader(conn) {
           conn.acc = "";
           if (!success)
             emit({ type: "error", message: `claude: ${msg.subtype}` });
-          // If this result was not triggered by a turn we sent (see
-          // isForegroundResult: e.g. origin.kind "task-notification" = a
-          // background sub-turn), the app is already idle, so we don't emit a
+          // Which of our pending turns this result answers (see takeAnswered:
+          // matched by client uuid, falling back to origin.kind).
+          const answered = takeAnswered(conn, msg);
+          // If it answers none of ours (e.g. origin.kind "task-notification" =
+          // a background sub-turn), the app is already idle, so we don't emit a
           // turn-ending result. When the SDK streamed the body (text_delta) it is
           // already on screen, so we only add a quiet "update" marker. But the SDK
           // does NOT always stream a background sub-turn — often it delivers only the
@@ -595,10 +664,10 @@ export async function runReader(conn) {
           // continuation is not lost. Overall completion is still announced on the
           // background_tasks_changed→[] side; other agents may still be running, so
           // this is an "update", not "complete".
-          if (!isForegroundResult(msg)) {
+          if (!answered.length) {
             dbgTurn(
               session,
-              `result: injected (origin.kind=${msg.origin?.kind}) → NOT resolving foreground (pendingFg=${conn.pendingFg.length} stays)`,
+              `result: not ours (origin.kind=${msg.origin?.kind}) → NOT resolving foreground (pendingFg=${conn.pendingFg.length} stays)`,
             );
             if (!wasStreaming && answer) {
               status("text_start");
@@ -633,9 +702,9 @@ export async function runReader(conn) {
             });
             dbgTurn(
               session,
-              `result: foreground → resolving runTurn (pendingFg ${conn.pendingFg.length}->${Math.max(0, conn.pendingFg.length - 1)})`,
+              `result: answers ${answered.length} of our turn(s) → resolving runTurn (pendingFg now ${conn.pendingFg.length})`,
             );
-            conn.pendingFg.shift()?.(answer); // return the corresponding runTurn
+            for (const p of answered) p.resolve(answer); // return the corresponding runTurn(s)
             // After a foreground turn, instead of emitting idle the bus queries
             // backgroundStatus(), so if a background remains, we can keep
             // background rather than reverting to "Waiting input" (see
@@ -671,7 +740,7 @@ export async function runReader(conn) {
         session,
         `reader end: releasing ${conn.pendingFg.length} pending foreground turn(s) as CANCELLED`,
       );
-    while (conn.pendingFg.length) conn.pendingFg.shift()?.(CANCELLED);
+    releasePending(conn, CANCELLED);
   }
 }
 
@@ -712,7 +781,7 @@ async function getConn(session, model) {
     q: null,
     emit: () => {}, // runTurn injects the latest turn's trackedEmit
     ask: null, // same as above (the permission/question round-trip)
-    pendingFg: [], // resolvers for foreground turns (usually ≤1 since the bus is serial)
+    pendingFg: [], // {uuid, resolve} per foreground turn we sent (usually ≤1 since the bus is serial)
     st: { streaming: false, thinkIdx: undefined, tools: new Map() },
     acc: "", // the current turn's response text (for saving to history)
     bgCount: 0, // number of active background tasks
@@ -984,14 +1053,19 @@ export default {
         });
       }
     }
-    const done = new Promise((resolve) => conn.pendingFg.push(resolve));
+    // The client uuid binds this send to the result that answers it, even when
+    // Claude Code folds it into a turn of its own (see takeAnswered).
+    const uuid = randomUUID();
+    const done = new Promise((resolve) =>
+      conn.pendingFg.push({ uuid, resolve }),
+    );
     dbgTurn(
       session,
-      `runTurn: enqueued user message (pendingFg=${conn.pendingFg.length}, bgCount=${conn.bgCount}) — awaiting foreground result`,
+      `runTurn: enqueued user message ${uuid} (pendingFg=${conn.pendingFg.length}, bgCount=${conn.bgCount}) — awaiting foreground result`,
     );
     // A followup is our own hidden auto-continuation, not human input: send it
     // unattributed rather than stamped human (see buildUserMessage).
-    conn.input.push(buildUserMessage(text, images, { human: !followup }));
+    conn.input.push(buildUserMessage(text, images, { human: !followup, uuid }));
     await done; // resolved by a foreground result (also resolved via CANCELLED on disconnect/interrupt)
     dbgTurn(
       session,
@@ -1035,6 +1109,6 @@ export default {
     } catch {
       /* swallow */
     }
-    while (conn.pendingFg.length) conn.pendingFg.shift()?.(CANCELLED);
+    releasePending(conn, CANCELLED);
   },
 };
