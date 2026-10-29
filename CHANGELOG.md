@@ -43,6 +43,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `CLAUDE_SESSION_IDLE_MS` (10 min) had its query closed and the background
   agent killed mid-flight. The check is now `isIdleForGc()`, which skips any
   query with a pending foreground turn or a non-zero background task count.
+- WebUI: reopening a session that is waiting on a question or permission
+  request no longer loses the answer card. The SSE resends the pending request
+  before the history fetch resolves, so the card landed at the top of the empty
+  log and the history was appended below it, pushing it off-screen. After the
+  history renders, any unanswered card is moved back to the end of the log,
+  keeping any input already typed.
 
 ### Security
 

@@ -222,6 +222,8 @@ Since it waits indefinitely, the fact that it is waiting must be visible, so the
   (this prevents a situation where no one can answer after a WebUI reload, an app restart, or a phone returning to the foreground).
   It is resent as the current state regardless of whether an incremental/full replay occurred, and the WebUI identifies
   the same request by `requestId` to prevent duplicate display or the loss of an in-progress answer.
+  The resend usually arrives before the WebUI's history fetch completes, so after rendering the history the WebUI
+  moves any unanswered card back to the end of the log (otherwise the history would push it off-screen).
 - The `permission_result` / `question_answer` emitted when an interrupt clears the wait carries
   `cancelled: true` (extension), so that the case where no one answered can be distinguished.
 
